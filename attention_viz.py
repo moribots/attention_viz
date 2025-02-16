@@ -92,10 +92,13 @@ sidebar = dbc.Card(
 		dbc.CardHeader("Instructions"),
 		dbc.CardBody(
 			[
-				html.P("1. The input text on the right is modifiable.", className="card-text"),
-				html.P("2. Select one or more layers and heads to view their attention heatmaps.", className="card-text"),
-				html.P("3. Adjust the attention threshold slider to filter weak connections.", className="card-text"),
-				html.P("4. Click on a cell in any heatmap to view token details.", className="card-text"),
+				html.P("- The input text on the right is modifiable.", className="card-text"),
+				html.P("- Select one or more layers and heads to view their attention heatmaps.", className="card-text"),
+				html.P("- Adjust the attention threshold slider to filter weak connections.", className="card-text"),
+				html.P("- Click on a cell in any heatmap to view token details.", className="card-text"),
+				html.P("- Reading intuition: pick a token at any row and go through the columns to understand how much it attends"
+				" to itself and prior tokens. E.g., in the default example, 'brown' @ Layer[0]Head[0] attends strongly"
+				" to itself and 'the', but not 'quick'.", className="card-text"),
 			]
 		),
 	],
