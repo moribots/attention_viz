@@ -158,6 +158,14 @@ main_content = dbc.Card(
 					marks={i/10: f"{i/10}" for i in range(0, 11)}
 				)
 			], style={'marginTop': '20px', 'marginBottom': '20px'}),
+			# New: Checkbox for causal intervention (ablate selected heads)
+			html.Div([
+				dcc.Checklist(
+					id="causal-intervention",
+					options=[{'label': '\tEnable Causal Tracing (Ablate Selected Heads)', 'value': 'ablate'}],
+					value=[]
+				)
+			], style={'marginTop': '20px', 'marginBottom': '20px'}),
 			# Graph component wrapped in a Loading spinner.
 			dcc.Loading(
 				id="loading-graph",
@@ -249,80 +257,111 @@ def update_heatmap(input_text, selected_layers, selected_heads, threshold):
 	
 	return fig
 
+def make_ablate_hook(selected_head):
+	"""
+	Creates a forward hook that zeros out the output corresponding to the selected attention head.
+	
+	Args:
+		selected_head (int): The index of the attention head to ablate.
+	
+	Returns:
+		hook (function): A function to be registered as a forward hook.
+	"""
+	def hook(module, input, output):
+		head_dim = lm_model.config.hidden_size // lm_model.config.n_head
+		start = selected_head * head_dim
+		end = start + head_dim
+		# If output is a tuple, assume the first element is the hidden states.
+		if isinstance(output, tuple):
+			attn_output = output[0]
+			attn_output_clone = attn_output.clone()
+			attn_output_clone[:, :, start:end] = 0
+			# Return the modified tuple with the rest of the outputs unchanged.
+			return (attn_output_clone,) + output[1:]
+		else:
+			output_clone = output.clone()
+			output_clone[:, :, start:end] = 0
+			return output_clone
+	return hook
+
 # -------------------------------
 # STEP 5: CREATE A CALLBACK TO UPDATE TOKEN INFO ON CLICK
 # -------------------------------
 @app.callback(
-	Output("token-info", "children"),
-	[Input("attention-heatmap", "clickData"),
-	 Input("input-text", "value")]
+    Output("token-info", "children"),
+    [Input("attention-heatmap", "clickData"),
+     Input("input-text", "value"),
+     Input("causal-intervention", "value"),
+     Input("layer-dropdown", "value"),
+     Input("head-dropdown", "value")]
 )
-def update_token_info(clickData, input_text):
-	"""
-	Callback that updates the token info Div based on a click event on the heatmap.
-	When a cell in the heatmap is clicked, extract the token from the 'x' value,
-	compute its token ID and embedding norm from the model's embedding layer,
-	and display this information along with the top next-token predictions.
-	
-	Args:
-		clickData (dict): Click event data from the Graph.
-		input_text (str): The input text (used to ensure token mapping consistency).
-		
-	Returns:
-		info (str): A formatted string containing extra metadata about the clicked token.
-	"""
-	if clickData is None:
-		return "Click on a cell in the heatmap to see token information."
-	
-	# Extract the token that was clicked. The clickData contains a 'points' list.
-	# We'll extract the 'x' value from the first point.
-	try:
-		token_clicked = clickData["points"][0]["x"]
-	except (KeyError, IndexError):
-		return "Error retrieving token info from click data."
-	
-	# Convert the clicked token to its token ID.
-	token_id = tokenizer.convert_tokens_to_ids(token_clicked)
-	
-	# Retrieve the token embedding from the model's embedding layer.
-	# GPT-2 stores its word embeddings in model.wte (word token embeddings).
-	embedding = model.wte.weight[token_id]
-	embedding_norm = torch.norm(embedding).item()
-	
-	# Prepare additional token metadata.
-	info = f"Token: {token_clicked}\nToken ID: {token_id}\nEmbedding Norm: {embedding_norm:.4f}"
-	
-	# --- Updated next-token prediction logic ---
-	# Re-tokenize the input text to get the full list of tokens.
-	full_input_ids = tokenizer.encode(input_text, return_tensors='pt')
-	full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
-	
-	# Find the index of the clicked token (if multiple occur, pick the first occurrence).
-	try:
-		token_index = full_tokens.index(token_clicked)
-	except ValueError:
-		token_index = len(full_tokens) - 1  # fallback to the last token if not found
-	
-	# Compute next-token predictions for the sequence up to and including the clicked token.
-	truncated_ids = full_input_ids[:, :token_index+1]
-	with torch.no_grad():
-		lm_outputs = lm_model(truncated_ids)
-	logits = lm_outputs.logits  # Shape: (batch_size, seq_len, vocab_size)
-	last_logits = logits[0, -1, :]
-	probs = torch.softmax(last_logits, dim=-1)
-	# Get top 5 predictions.
-	topk = 5
-	top_probs, top_indices = torch.topk(probs, topk)
-	top_tokens = tokenizer.convert_ids_to_tokens(top_indices.tolist())
-	# Format the predictions info.
-	pred_info = "\n\nNext Token Predictions:\n"
-	for token, prob in zip(top_tokens, top_probs.tolist()):
-		pred_info += f"{token}: {prob:.4f}\n"
-	# Append the predictions info to the existing info.
-	info += pred_info
-	
-	# Display the token information in a preformatted text block.
-	return html.Pre(info)
+def update_token_info(clickData, input_text, causal_intervention, layer_dropdown, head_dropdown):
+    """
+    Callback that updates the token info Div based on a click event on the heatmap.
+    When a cell in the heatmap is clicked, it extracts the token from the 'x' value,
+    computes its token ID and embedding norm from the model's embedding layer, and displays 
+    this information along with the top next-token predictions. If causal intervention is enabled,
+    the selected attention heads (from the dropdowns) are ablated in the LM model before prediction.
+    """
+    if clickData is None:
+        return "Click on a cell in the heatmap to see token information."
+    
+    try:
+        token_clicked = clickData["points"][0]["x"]
+    except (KeyError, IndexError):
+        return "Error retrieving token info from click data."
+    
+    token_id = tokenizer.convert_tokens_to_ids(token_clicked)
+    embedding = model.wte.weight[token_id]
+    embedding_norm = torch.norm(embedding).item()
+    info = f"Token: {token_clicked}\nToken ID: {token_id}\nEmbedding Norm: {embedding_norm:.4f}"
+    
+    # Re-tokenize the full input and find the index of the clicked token.
+    full_input_ids = tokenizer.encode(input_text, return_tensors='pt')
+    full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
+    try:
+        token_index = full_tokens.index(token_clicked)
+    except ValueError:
+        token_index = len(full_tokens) - 1
+    
+    # Use the context up to and including the clicked token.
+    truncated_ids = full_input_ids[:, :token_index+1]
+    
+    # Determine if causal intervention is enabled.
+    if 'ablate' in causal_intervention:
+        # Ensure layer_dropdown and head_dropdown are lists.
+        layer_list = layer_dropdown if isinstance(layer_dropdown, list) else [layer_dropdown]
+        head_list = head_dropdown if isinstance(head_dropdown, list) else [head_dropdown]
+        hook_handles = []
+        # Register a hook for every selected layer and head.
+        for layer in layer_list:
+            for head in head_list:
+                hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
+                    make_ablate_hook(head)
+                )
+                hook_handles.append(hook_handle)
+        with torch.no_grad():
+            lm_outputs = lm_model(truncated_ids)
+        # Remove all hooks.
+        for handle in hook_handles:
+            handle.remove()
+    else:
+        with torch.no_grad():
+            lm_outputs = lm_model(truncated_ids)
+    
+    logits = lm_outputs.logits  # Shape: (batch, seq_len, vocab_size)
+    last_logits = logits[0, -1, :]
+    probs = torch.softmax(last_logits, dim=-1)
+    topk = 5
+    top_probs, top_indices = torch.topk(probs, topk)
+    top_tokens = tokenizer.convert_ids_to_tokens(top_indices.tolist())
+    pred_info = "\n\nNext Token Predictions:\n"
+    for token, prob in zip(top_tokens, top_probs.tolist()):
+        pred_info += f"{token}: {prob:.4f}\n"
+    info += pred_info
+    
+    return html.Pre(info)
+
 
 
 # -------------------------------
