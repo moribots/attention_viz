@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots 
 import torch
 from transformers import GPT2Tokenizer, GPT2Model  # Hugging Face Transformers for pre-trained models
+from transformers import GPT2LMHeadModel  # Added for next-token predictions
 import numpy as np
 import dash_bootstrap_components as dbc  # For improved UI styling with Bootstrap.
 
@@ -20,6 +21,10 @@ tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 # The 'output_attentions=True' flag ensures that the model returns attention weights.
 model = GPT2Model.from_pretrained('gpt2', output_attentions=True)
 model.eval()  # Set model to evaluation mode to disable dropout and other training-specific layers.
+
+# Added: Load the GPT-2 language model for next-token predictions.
+lm_model = GPT2LMHeadModel.from_pretrained('gpt2')
+lm_model.eval()
 
 # Retrieve configuration details: number of layers and heads.
 NUM_LAYERS = model.config.n_layer  # e.g., GPT-2 base has 12 layers.
@@ -257,7 +262,7 @@ def update_token_info(clickData, input_text):
 	Callback that updates the token info Div based on a click event on the heatmap.
 	When a cell in the heatmap is clicked, extract the token from the 'x' value,
 	compute its token ID and embedding norm from the model's embedding layer,
-	and display this information.
+	and display this information along with the top next-token predictions.
 	
 	Args:
 		clickData (dict): Click event data from the Graph.
@@ -287,8 +292,38 @@ def update_token_info(clickData, input_text):
 	# Prepare additional token metadata.
 	info = f"Token: {token_clicked}\nToken ID: {token_id}\nEmbedding Norm: {embedding_norm:.4f}"
 	
+	# --- Updated next-token prediction logic ---
+	# Re-tokenize the input text to get the full list of tokens.
+	full_input_ids = tokenizer.encode(input_text, return_tensors='pt')
+	full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
+	
+	# Find the index of the clicked token (if multiple occur, pick the first occurrence).
+	try:
+		token_index = full_tokens.index(token_clicked)
+	except ValueError:
+		token_index = len(full_tokens) - 1  # fallback to the last token if not found
+	
+	# Compute next-token predictions for the sequence up to and including the clicked token.
+	truncated_ids = full_input_ids[:, :token_index+1]
+	with torch.no_grad():
+		lm_outputs = lm_model(truncated_ids)
+	logits = lm_outputs.logits  # Shape: (batch_size, seq_len, vocab_size)
+	last_logits = logits[0, -1, :]
+	probs = torch.softmax(last_logits, dim=-1)
+	# Get top 5 predictions.
+	topk = 5
+	top_probs, top_indices = torch.topk(probs, topk)
+	top_tokens = tokenizer.convert_ids_to_tokens(top_indices.tolist())
+	# Format the predictions info.
+	pred_info = "\n\nNext Token Predictions:\n"
+	for token, prob in zip(top_tokens, top_probs.tolist()):
+		pred_info += f"{token}: {prob:.4f}\n"
+	# Append the predictions info to the existing info.
+	info += pred_info
+	
 	# Display the token information in a preformatted text block.
 	return html.Pre(info)
+
 
 # -------------------------------
 # STEP 6: RUN THE DASH APP
