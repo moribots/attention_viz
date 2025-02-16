@@ -95,6 +95,7 @@ sidebar = dbc.Card(
 				html.P("1. The input text on the right is modifiable.", className="card-text"),
 				html.P("2. Select one or more layers and heads to view their attention heatmaps.", className="card-text"),
 				html.P("3. Adjust the attention threshold slider to filter weak connections.", className="card-text"),
+				html.P("4. Click on a cell in any heatmap to view token details.", className="card-text"),
 			]
 		),
 	],
@@ -149,12 +150,14 @@ main_content = dbc.Card(
 					marks={i/10: f"{i/10}" for i in range(0, 11)}
 				)
 			], style={'marginTop': '20px', 'marginBottom': '20px'}),
-			# Graph component wrapped in a Loading spinner for better UX.
+			# Graph component wrapped in a Loading spinner.
 			dcc.Loading(
 				id="loading-graph",
 				type="circle",
 				children=dcc.Graph(id="attention-heatmap")
-			)
+			),
+			# New: Div to display enhanced token info on click.
+			html.Div(id="token-info", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'})
 		]
 	),
 	style={"width": "100%"}
@@ -178,7 +181,7 @@ app.layout = dbc.Container(
 )
 
 # -------------------------------
-# STEP 4: CREATE A CALLBACK TO UPDATE THE HEATMAP WITH ANIMATED TRANSITIONS
+# STEP 4: CREATE A CALLBACK TO UPDATE THE HEATMAP
 # -------------------------------
 @app.callback(
 	Output("attention-heatmap", "figure"),  # The callback outputs a Plotly figure to the Graph component.
@@ -236,18 +239,56 @@ def update_heatmap(input_text, selected_layers, selected_heads, threshold):
 			# Add the trace to the appropriate subplot cell.
 			fig.add_trace(heatmap, row=i+1, col=j+1)
 	
-	# Update layout with animated transition parameters.
-	fig.update_layout(
-		height=300 * rows, 
-		width=400 * cols,
-		title_text="Interactive Multi-Head & Multi-Layer Attention Visualization (Filtered)",
-		transition={'duration': 500, 'easing': 'cubic-in-out'}  # Animate transitions smoothly.
-	)
-	
 	return fig
 
 # -------------------------------
-# STEP 5: RUN THE DASH APP
+# STEP 5: CREATE A CALLBACK TO UPDATE TOKEN INFO ON CLICK
+# -------------------------------
+@app.callback(
+	Output("token-info", "children"),
+	[Input("attention-heatmap", "clickData"),
+	 Input("input-text", "value")]
+)
+def update_token_info(clickData, input_text):
+	"""
+	Callback that updates the token info Div based on a click event on the heatmap.
+	When a cell in the heatmap is clicked, extract the token from the 'x' value,
+	compute its token ID and embedding norm from the model's embedding layer,
+	and display this information.
+	
+	Args:
+		clickData (dict): Click event data from the Graph.
+		input_text (str): The input text (used to ensure token mapping consistency).
+		
+	Returns:
+		info (str): A formatted string containing extra metadata about the clicked token.
+	"""
+	if clickData is None:
+		return "Click on a cell in the heatmap to see token information."
+	
+	# Extract the token that was clicked. The clickData contains a 'points' list.
+	# We'll extract the 'x' value from the first point.
+	try:
+		token_clicked = clickData["points"][0]["x"]
+	except (KeyError, IndexError):
+		return "Error retrieving token info from click data."
+	
+	# Convert the clicked token to its token ID.
+	token_id = tokenizer.convert_tokens_to_ids(token_clicked)
+	
+	# Retrieve the token embedding from the model's embedding layer.
+	# GPT-2 stores its word embeddings in model.wte (word token embeddings).
+	embedding = model.wte.weight[token_id]
+	embedding_norm = torch.norm(embedding).item()
+	
+	# Prepare additional token metadata.
+	info = f"Token: {token_clicked}\nToken ID: {token_id}\nEmbedding Norm: {embedding_norm:.4f}"
+	
+	# Display the token information in a preformatted text block.
+	return html.Pre(info)
+
+# -------------------------------
+# STEP 6: RUN THE DASH APP
 # -------------------------------
 if __name__ == '__main__':
 	app.run_server(debug=True)
