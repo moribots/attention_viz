@@ -1,7 +1,8 @@
 import dash                            # Dash for building web apps
 from dash import dcc, html             # Core and HTML components
 from dash.dependencies import Input, Output  # Interactive callbacks
-import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots 
 import torch
 from transformers import GPT2Tokenizer, GPT2Model  # Hugging Face Transformers for pre-trained models
 import numpy as np
@@ -63,7 +64,6 @@ def get_attention_data(input_text, layer, head):
 	# Convert to numpy
 	attn_data = attn.cpu().numpy()
 	
-	# Return the attention data and the corresponding tokens.
 	return attn_data, tokens
 
 # -------------------------------
@@ -87,78 +87,105 @@ app.layout = html.Div([
 		)
 	], style={'marginBottom': '20px'}),
 	
-	# Transformer layer selector
+	# Transformer layer selector.
+	# 'multi=True' allows selecting multiple layers.
 	html.Div([
-		html.Label("Select Layer:"),
+		html.Label("Select Layers:"),
 		dcc.Dropdown(
-			id="layer-dropdown",           
+			id="layer-dropdown",
 			options=[{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)],
-			value=0,                
+			value=[0],  # Default selection: Layer 0.
+			multi=True,
 			clearable=False
 		)
-	], style={'width': '30%', 'display': 'inline-block', 'marginRight': '20px'}),
+	], style={'width': '45%', 'display': 'inline-block', 'marginRight': '20px'}),
 	
-	# Transformer head selector (within chosen layer)
+	# Transformer layer selector.
+	# 'multi=True' allows selecting multiple layers.
 	html.Div([
-		html.Label("Select Head:"),
+		html.Label("Select Heads:"),
 		dcc.Dropdown(
-			id="head-dropdown",            
+			id="head-dropdown",
 			options=[{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)],
-			value=0,
+			value=[0],
+			multi=True,
 			clearable=False
 		)
-	], style={'width': '30%', 'display': 'inline-block'}),
+	], style={'width': '45%', 'display': 'inline-block'}),
 	
-	# Graph component to display the attention heatmap.
+	# Graph component to display the attention heatmap(s).
 	dcc.Graph(id="attention-heatmap")
 ])
 
 # -------------------------------
-# STEP 4: CREATE A CALLBACK TO UPDATE THE HEATMAP DYNAMICALLY
+# STEP 4: Create a Callback to Update the Heatmap Dynamically
 # -------------------------------
-# The callback function links the UI components (input text, layer and head dropdowns)
-# to the Graph component. It updates the attention heatmap based on user input.
 @app.callback(
 	Output("attention-heatmap", "figure"),  # The callback outputs a Plotly figure to the Graph component.
 	[Input("input-text", "value"),
 	 Input("layer-dropdown", "value"),
 	 Input("head-dropdown", "value")]
 )
-def update_heatmap(input_text, selected_layer, selected_head):
+def update_heatmap(input_text, selected_layers, selected_heads):
 	"""
 	Callback that updates the attention heatmap based on user inputs:
 	- Input text
 	- Selected layers and heads
 	
 	Args:
-		input_text (str): The text entered by the user.
-		selected_layer (int): The index of the selected Transformer layer.
-		selected_head (int): The index of the selected attention head.
-	
+		input_text (str): The sentence input by the user.
+		selected_layers (list): List of selected Transformer layer indices.
+		selected_heads (list): List of selected attention head indices.
+
 	Returns:
-		fig (plotly.graph_objs._figure.Figure): The updated heatmap figure.
+		fig (plotly.graph_objects.Figure): The updated figure with a subplot grid showing
+										   the attention heatmaps for each (layer, head) pair.
 	"""
-	# Extract the attention weights and tokens for the provided input and selection.
-	attn_data, tokens = get_attention_data(input_text, selected_layer, selected_head)
+	# Ensure that selected_layers and selected_heads are lists.
+	if not isinstance(selected_layers, list):
+		selected_layers = [selected_layers]
+	if not isinstance(selected_heads, list):
+		selected_heads = [selected_heads]
 	
-	# Create an interactive heatmap using Plotly Express.
-	# 'px.imshow' automatically creates a heatmap from a 2D NumPy array.
-	fig = px.imshow(
-		attn_data,  # The 2D attention matrix.
-		labels=dict(x="Token Position", y="Token Position", color="Attention Weight"),
-		x=tokens,   # Label columns with token strings.
-		y=tokens,   # Label rows with token strings.
-		color_continuous_scale='Viridis'  # Color scale for visualizing attention weights.
+	# Determine the number of rows and columns for the subplot grid.
+	rows = len(selected_layers)
+	cols = len(selected_heads)
+	
+	# Create subplot titles for each (layer, head) combination.
+	subplot_titles = [f"Layer {layer}, Head {head}" for layer in selected_layers for head in selected_heads]
+	
+	# Create a subplot grid using Plotly's make_subplots.
+	fig = make_subplots(rows=rows, cols=cols, subplot_titles=subplot_titles)
+	
+	# Loop over each selected layer and head to extract and plot the corresponding attention heatmap.
+	for i, layer in enumerate(selected_layers):
+		for j, head in enumerate(selected_heads):
+			# Get the attention data and token labels.
+			attn_data, tokens = get_attention_data(input_text, layer, head)
+			
+			# Create a heatmap trace using Plotly Graph Objects.
+			heatmap = go.Heatmap(
+				z=attn_data,             # The 2D attention matrix.
+				x=tokens,                # Token labels for the x-axis.
+				y=tokens,                # Token labels for the y-axis.
+				colorscale='Viridis',    # Color scale for visualization.
+				colorbar=dict(title="Attention Weight")
+			)
+			
+			# Add the heatmap trace to the appropriate subplot.
+			fig.add_trace(heatmap, row=i+1, col=j+1)
+	
+	# Update the overall layout of the figure, including title and dimensions.
+	fig.update_layout(
+		height=300 * rows, 
+		width=400 * cols,
+		title_text="Interactive Multi-Head & Multi-Layer Attention Visualization"
 	)
 	
-	# Update the layout of the figure with a title indicating the current layer and head.
-	fig.update_layout(title=f"Attention Heatmap: Layer {selected_layer}, Head {selected_head}")
-	
-	# Return the updated figure to be displayed in the Dash app.
 	return fig
 
 # -------------------------------
-# STEP 5: RUN THE DASH APP
+# STEP 5: Run the Dash App
 # -------------------------------
 if __name__ == '__main__':
 	app.run_server(debug=True)
