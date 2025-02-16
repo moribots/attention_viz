@@ -8,14 +8,14 @@ from transformers import GPT2Tokenizer, GPT2Model  # Hugging Face Transformers f
 import numpy as np
 
 # -------------------------------
-# STEP 1: Load the GPT-2 Model and Tokenizer
+# STEP 1: LOAD THE MODEL AND TOKENIZER
 # -------------------------------
 # Initialize the GPT-2 tokenizer to convert text into token IDs.
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 # Load the GPT-2 model with attention outputs enabled.
 # The 'output_attentions=True' flag ensures that the model returns attention weights.
 model = GPT2Model.from_pretrained('gpt2', output_attentions=True)
-model.eval()  # Set model to evaluation mode to disable training-specific behaviors (e.g., dropout).
+model.eval()  # Set model to evaluation mode to disable dropout and other training-specific layers.
 
 # Retrieve configuration details: number of layers and heads.
 NUM_LAYERS = model.config.n_layer  # e.g., GPT-2 base has 12 layers.
@@ -48,7 +48,7 @@ def get_attention_data(input_text, layer, head, threshold=0.0):
 	# Convert token IDs back to token strings for labeling the axes in the heatmap.
 	tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
 	
-	# Run the model with the tokenized input. Use no_grad to disable gradient computation.
+	# Run the model with no gradient computation.
 	with torch.no_grad():
 		outputs = model(input_ids)
 	
@@ -66,15 +66,20 @@ def get_attention_data(input_text, layer, head, threshold=0.0):
 	# Convert to numpy
 	attn_data = attn.cpu().numpy()
 	
-	# Apply threshold filtering: Set all attention weights below the threshold to zero.
+	# Apply threshold filtering: set values below the threshold to zero.
 	filtered_attn_data = np.where(attn_data >= threshold, attn_data, 0)
 	
 	return filtered_attn_data, tokens
 
 # -------------------------------
-# STEP 3: Create the Dash App Layout
+# STEP 3: CREATE THE DASH APP LAYOUT WITH A THRESHOLD SLIDER
 # -------------------------------
 app = dash.Dash(__name__)
+
+# Define dropdown options for layers (without "Select All" option).
+layer_options = [{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)]
+# Define dropdown options for heads (without "Select All" option).
+head_options = [{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)]
 
 app.layout = html.Div([
 	# Title
@@ -92,7 +97,6 @@ app.layout = html.Div([
 	], style={'marginBottom': '20px'}),
 	
 	# Transformer layer selector.
-	# 'multi=True' allows selecting multiple layers.
 	html.Div([
 		html.Label("Select Layers:"),
 		dcc.Dropdown(
@@ -105,7 +109,6 @@ app.layout = html.Div([
 	], style={'width': '45%', 'display': 'inline-block', 'marginRight': '20px'}),
 	
 	# Transformer layer selector.
-	# 'multi=True' allows selecting multiple layers.
 	html.Div([
 		html.Label("Select Heads:"),
 		dcc.Dropdown(
@@ -135,7 +138,7 @@ app.layout = html.Div([
 ])
 
 # -------------------------------
-# STEP 4: CREATE A CALLBACK TO UPDATE THE HEATMAP DYNAMICALLY WITH THRESHOLDING
+# STEP 4: CREATE A CALLBACK TO UPDATE THE HEATMAP WITH ANIMATED TRANSITIONS
 # -------------------------------
 @app.callback(
 	Output("attention-heatmap", "figure"),  # The callback outputs a Plotly figure to the Graph component.
@@ -149,6 +152,7 @@ def update_heatmap(input_text, selected_layers, selected_heads, threshold):
 	Callback that updates the attention heatmap based on user inputs:
 	- Input text
 	- Selected layers and heads
+	- Threshold for filtering attention weights
 	
 	Args:
 		input_text (str): The sentence input by the user.
@@ -164,45 +168,46 @@ def update_heatmap(input_text, selected_layers, selected_heads, threshold):
 	if not isinstance(selected_heads, list):
 		selected_heads = [selected_heads]
 	
-	# Determine the grid dimensions based on the number of selected layers and heads.
+	# Determine grid dimensions based on selected layers and heads.
 	rows = len(selected_layers)
 	cols = len(selected_heads)
 	
 	# Create subplot titles for each (layer, head) pair.
 	subplot_titles = [f"Layer {layer}, Head {head}" for layer in selected_layers for head in selected_heads]
 	
-	# Create a subplot grid using Plotly's make_subplots.
+	# Create a subplot grid.
 	fig = make_subplots(rows=rows, cols=cols, subplot_titles=subplot_titles)
 	
-	# Loop over each selected layer and head to extract and plot the corresponding attention heatmap.
+	# Loop over each selected layer and head.
 	for i, layer in enumerate(selected_layers):
 		for j, head in enumerate(selected_heads):
-			# Extract the filtered attention data and token labels with the applied threshold.
+			# Get filtered attention data and tokens for the given parameters.
 			attn_data, tokens = get_attention_data(input_text, layer, head, threshold)
 			
 			# Create a heatmap trace.
 			heatmap = go.Heatmap(
-				z=attn_data,             # The filtered attention matrix.
-				x=tokens,                # Labels for the x-axis (token strings).
-				y=tokens,                # Labels for the y-axis.
-				colorscale='Viridis',    # Color scale for visualizing the attention weights.
+				z=attn_data,
+				x=tokens,
+				y=tokens,
+				colorscale='Viridis',
 				colorbar=dict(title="Attention Weight")
 			)
 			
-			# Add the heatmap trace to the correct subplot cell.
+			# Add the trace to the appropriate subplot cell.
 			fig.add_trace(heatmap, row=i+1, col=j+1)
 	
-	# Update the overall layout of the figure, including title and dimensions.
+	# Update layout with animated transition parameters.
 	fig.update_layout(
 		height=300 * rows, 
 		width=400 * cols,
-		title_text="Interactive Multi-Head & Multi-Layer Attention Visualization (Filtered)"
+		title_text="Interactive Multi-Head & Multi-Layer Attention Visualization (Filtered)",
+		transition={'duration': 500, 'easing': 'cubic-in-out'}  # Animate transitions smoothly.
 	)
 	
 	return fig
 
 # -------------------------------
-# STEP 5: Run the Dash App
+# STEP 5: RUN THE DASH APP
 # -------------------------------
 if __name__ == '__main__':
 	app.run_server(debug=True)
