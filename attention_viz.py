@@ -104,6 +104,9 @@ sidebar = dbc.Card(
 				html.P("- Reading intuition: pick a token at any row and go through the columns to understand how much it attends"
 				" to itself and prior tokens. E.g., in the default example, 'brown' @ Layer[0]Head[0] attends strongly"
 				" to itself and 'the', but not 'quick'.", className="card-text"),
+				html.P("- Check the ablation box to see how masking the selected Layer/Head combo changes the next prediction distribution."
+		   		" This will also show KL divergence, which quantifies the change in probability distribution, where higher values indicate a larger change.", className="card-text"),
+
 			]
 		),
 	],
@@ -300,8 +303,9 @@ def update_token_info(clickData, input_text, causal_intervention, layer_dropdown
     Callback that updates the token info Div based on a click event on the heatmap.
     When a cell in the heatmap is clicked, it extracts the token from the 'x' value,
     computes its token ID and embedding norm from the model's embedding layer, and displays 
-    this information along with the top next-token predictions. If causal intervention is enabled,
-    the selected attention heads (from the dropdowns) are ablated in the LM model before prediction.
+    this information along with deeper analysis metrics. The analysis includes baseline 
+    next-token predictions, and if causal intervention is enabled, ablated predictions,
+    KL divergence between the distributions, and whether the top prediction changed.
     """
     if clickData is None:
         return "Click on a cell in the heatmap to see token information."
@@ -327,13 +331,26 @@ def update_token_info(clickData, input_text, causal_intervention, layer_dropdown
     # Use the context up to and including the clicked token.
     truncated_ids = full_input_ids[:, :token_index+1]
     
-    # Determine if causal intervention is enabled.
+    # ----- Compute Baseline Predictions (without intervention) -----
+    with torch.no_grad():
+        baseline_outputs = lm_model(truncated_ids)
+    baseline_logits = baseline_outputs.logits[0, -1, :]
+    baseline_probs = torch.softmax(baseline_logits, dim=-1)
+    baseline_topk = 5
+    baseline_top_probs, baseline_top_indices = torch.topk(baseline_probs, baseline_topk)
+    baseline_top_tokens = tokenizer.convert_ids_to_tokens(baseline_top_indices.tolist())
+    
+    baseline_info = "\n\nBaseline Next Token Predictions:\n"
+    for token, prob in zip(baseline_top_tokens, baseline_top_probs.tolist()):
+        baseline_info += f"{token}: {prob:.4f}\n"
+    
+    # ----- If Causal Intervention is Enabled, Compute Ablated Predictions -----
     if 'ablate' in causal_intervention:
         # Ensure layer_dropdown and head_dropdown are lists.
         layer_list = layer_dropdown if isinstance(layer_dropdown, list) else [layer_dropdown]
         head_list = head_dropdown if isinstance(head_dropdown, list) else [head_dropdown]
         hook_handles = []
-        # Register a hook for every selected layer and head.
+        # Register hooks for every combination of selected layers and heads.
         for layer in layer_list:
             for head in head_list:
                 hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
@@ -341,28 +358,40 @@ def update_token_info(clickData, input_text, causal_intervention, layer_dropdown
                 )
                 hook_handles.append(hook_handle)
         with torch.no_grad():
-            lm_outputs = lm_model(truncated_ids)
-        # Remove all hooks.
+            ablated_outputs = lm_model(truncated_ids)
         for handle in hook_handles:
             handle.remove()
+            
+        ablated_logits = ablated_outputs.logits[0, -1, :]
+        ablated_probs = torch.softmax(ablated_logits, dim=-1)
+        ablated_topk = 5
+        ablated_top_probs, ablated_top_indices = torch.topk(ablated_probs, ablated_topk)
+        ablated_top_tokens = tokenizer.convert_ids_to_tokens(ablated_top_indices.tolist())
+        
+        ablated_info = "\n\nAblated Next Token Predictions:\n"
+        for token, prob in zip(ablated_top_tokens, ablated_top_probs.tolist()):
+            ablated_info += f"{token}: {prob:.4f}\n"
+        
+        # ----- Compute Deeper Analysis Metrics -----
+        # KL Divergence between baseline and ablated distributions.
+        # Add a small epsilon to avoid log(0)
+        epsilon = 1e-10
+        kl_div = torch.sum(baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))).item()
+        # Compare top predictions.
+        baseline_top_token = baseline_top_tokens[0]
+        ablated_top_token = ablated_top_tokens[0]
+        top_token_change = f"Top token changed from '{baseline_top_token}' to '{ablated_top_token}'" \
+                           if baseline_top_token != ablated_top_token else "Top token remains unchanged"
+        
+        deeper_metrics = "\n\nDeeper Analysis Metrics:\n"
+        deeper_metrics += f"KL Divergence: {kl_div:.4f}\n"
+        deeper_metrics += f"{top_token_change}\n"
+        
+        info += baseline_info + ablated_info + deeper_metrics
     else:
-        with torch.no_grad():
-            lm_outputs = lm_model(truncated_ids)
-    
-    logits = lm_outputs.logits  # Shape: (batch, seq_len, vocab_size)
-    last_logits = logits[0, -1, :]
-    probs = torch.softmax(last_logits, dim=-1)
-    topk = 5
-    top_probs, top_indices = torch.topk(probs, topk)
-    top_tokens = tokenizer.convert_ids_to_tokens(top_indices.tolist())
-    pred_info = "\n\nNext Token Predictions:\n"
-    for token, prob in zip(top_tokens, top_probs.tolist()):
-        pred_info += f"{token}: {prob:.4f}\n"
-    info += pred_info
+        info += baseline_info
     
     return html.Pre(info)
-
-
 
 # -------------------------------
 # STEP 6: RUN THE DASH APP
