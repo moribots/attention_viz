@@ -6,6 +6,10 @@ from plotly.subplots import make_subplots
 import torch
 from transformers import GPT2Tokenizer, GPT2Model  # Hugging Face Transformers for pre-trained models
 import numpy as np
+import dash_bootstrap_components as dbc  # For improved UI styling with Bootstrap.
+
+# Use Bootstrap stylesheet for better styling.
+external_stylesheets = [dbc.themes.BOOTSTRAP]
 
 # -------------------------------
 # STEP 1: LOAD THE MODEL AND TOKENIZER
@@ -72,70 +76,106 @@ def get_attention_data(input_text, layer, head, threshold=0.0):
 	return filtered_attn_data, tokens
 
 # -------------------------------
-# STEP 3: CREATE THE DASH APP LAYOUT WITH A THRESHOLD SLIDER
+# STEP 3: CREATE THE DASH APP LAYOUT WITH A USER-FRIENDLY UI/UX
 # -------------------------------
-app = dash.Dash(__name__)
+# Initialize the Dash app with external Bootstrap stylesheet.
+app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 
 # Define dropdown options for layers (without "Select All" option).
 layer_options = [{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)]
 # Define dropdown options for heads (without "Select All" option).
 head_options = [{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)]
 
-app.layout = html.Div([
-	# Title
-	html.H1("Attention Visualization"),
-	
-	# User input
-	html.Div([
-		html.Label("Input Text:"),
-		dcc.Input(
-			id="input-text",
-			type="text",
-			value="The quick brown fox jumps over the lazy dog.",
-			style={'width': '100%'}
+# Create a sidebar card with instructions.
+sidebar = dbc.Card(
+	[
+		dbc.CardHeader("Instructions"),
+		dbc.CardBody(
+			[
+				html.P("1. The input text on the right is modifiable.", className="card-text"),
+				html.P("2. Select one or more layers and heads to view their attention heatmaps.", className="card-text"),
+				html.P("3. Adjust the attention threshold slider to filter weak connections.", className="card-text"),
+			]
+		),
+	],
+	style={"width": "100%", "marginBottom": "20px"}
+)
+
+# Create the main content layout.
+main_content = dbc.Card(
+	dbc.CardBody(
+		[
+			# Input text component.
+			html.Div([
+				html.Label("Input Text:"),
+				dcc.Input(
+					id="input-text", 
+					type="text", 
+					value="The quick brown fox jumps over the lazy dog.",
+					style={'width': '100%'}
+				)
+			], style={'marginBottom': '20px'}),
+			# Dropdown for selecting layers.
+			html.Div([
+				html.Label("Select Layers:"),
+				dcc.Dropdown(
+					id="layer-dropdown",
+					options=layer_options,
+					value=[0],
+					multi=True,
+					clearable=False
+				)
+			], style={'width': '45%', 'display': 'inline-block', 'marginRight': '20px'}),
+			# Dropdown for selecting heads.
+			html.Div([
+				html.Label("Select Heads:"),
+				dcc.Dropdown(
+					id="head-dropdown",
+					options=head_options,
+					value=[0],
+					multi=True,
+					clearable=False
+				)
+			], style={'width': '45%', 'display': 'inline-block'}),
+			# Slider for dynamic filtering and thresholding.
+			html.Div([
+				html.Label("Attention Threshold (0.0 - 1.0):"),
+				dcc.Slider(
+					id="threshold-slider",
+					min=0.0,
+					max=1.0,
+					step=0.01,
+					value=0.0,
+					marks={i/10: f"{i/10}" for i in range(0, 11)}
+				)
+			], style={'marginTop': '20px', 'marginBottom': '20px'}),
+			# Graph component wrapped in a Loading spinner for better UX.
+			dcc.Loading(
+				id="loading-graph",
+				type="circle",
+				children=dcc.Graph(id="attention-heatmap")
+			)
+		]
+	),
+	style={"width": "100%"}
+)
+
+# Use a responsive container with a row that has two columns: sidebar and main content.
+app.layout = dbc.Container(
+	[
+		dbc.Row(
+			dbc.Col(html.H1("Interactive Attention Visualization"), width=12),
+			style={"marginTop": "20px", "marginBottom": "20px"}
+		),
+		dbc.Row(
+			[
+				dbc.Col(sidebar, width=3),
+				dbc.Col(main_content, width=9)
+			]
 		)
-	], style={'marginBottom': '20px'}),
-	
-	# Transformer layer selector.
-	html.Div([
-		html.Label("Select Layers:"),
-		dcc.Dropdown(
-			id="layer-dropdown",
-			options=[{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)],
-			value=[0],
-			multi=True,
-			clearable=False
-		)
-	], style={'width': '45%', 'display': 'inline-block', 'marginRight': '20px'}),
-	
-	# Transformer layer selector.
-	html.Div([
-		html.Label("Select Heads:"),
-		dcc.Dropdown(
-			id="head-dropdown",
-			options=[{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)],
-			value=[0],
-			multi=True,
-			clearable=False
-		)
-	], style={'width': '45%', 'display': 'inline-block'}),
-	
-	# Slider for dynamic filtering and thresholding.
-	html.Div([
-		html.Label("Attention Threshold (0.0 - 1.0):"),
-		dcc.Slider(
-			id="threshold-slider",
-			min=0.0,
-			max=1.0,
-			step=0.01,
-			value=0.0,
-			marks={i/10: f"{i/10}" for i in range(0, 11)}
-		)
-	], style={'marginTop': '20px', 'marginBottom': '20px'}),
-	
-	# Graph to display the attention heatmap(s).
-	dcc.Graph(id="attention-heatmap")
-])
+	],
+	fluid=True
+)
 
 # -------------------------------
 # STEP 4: CREATE A CALLBACK TO UPDATE THE HEATMAP WITH ANIMATED TRANSITIONS
