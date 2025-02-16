@@ -8,7 +8,7 @@ from transformers import GPT2Tokenizer, GPT2Model  # Hugging Face Transformers f
 import numpy as np
 
 # -------------------------------
-# STEP 1: LOAD THE MODEL AND TOKENIZER
+# STEP 1: Load the GPT-2 Model and Tokenizer
 # -------------------------------
 # Initialize the GPT-2 tokenizer to convert text into token IDs.
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
@@ -48,7 +48,7 @@ def get_attention_data(input_text, layer, head, threshold=0.0):
 	# Convert token IDs back to token strings for labeling the axes in the heatmap.
 	tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
 	
-	# Run the model with no gradient computation.
+	# Run the model with the tokenized input. Use no_grad to disable gradient computation.
 	with torch.no_grad():
 		outputs = model(input_ids)
 	
@@ -72,17 +72,9 @@ def get_attention_data(input_text, layer, head, threshold=0.0):
 	return filtered_attn_data, tokens
 
 # -------------------------------
-# STEP 3: CREATE THE DASH APP LAYOUT WITH A THRESHOLD SLIDER
+# STEP 3: Create the Dash App Layout
 # -------------------------------
 app = dash.Dash(__name__)
-
-# Create app layout
-# Define dropdown options for layers with an option for selecting all layers.
-layer_options = [{'label': "All Layers", 'value': 'all'}] + \
-	[{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)]
-# Define dropdown options for heads with an option for selecting all heads.
-head_options = [{'label': "All Heads", 'value': 'all'}] + \
-	[{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)]
 
 app.layout = html.Div([
 	# Title
@@ -105,8 +97,8 @@ app.layout = html.Div([
 		html.Label("Select Layers:"),
 		dcc.Dropdown(
 			id="layer-dropdown",
-			options=layer_options,
-			value=['all'],
+			options=[{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)],
+			value=[0],
 			multi=True,
 			clearable=False
 		)
@@ -118,8 +110,8 @@ app.layout = html.Div([
 		html.Label("Select Heads:"),
 		dcc.Dropdown(
 			id="head-dropdown",
-			options=head_options,
-			value=['all'],
+			options=[{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)],
+			value=[0],
 			multi=True,
 			clearable=False
 		)
@@ -133,7 +125,7 @@ app.layout = html.Div([
 			min=0.0,
 			max=1.0,
 			step=0.01,
-			value=0.0,  # Default threshold is 0.0 (no filtering).
+			value=0.0,
 			marks={i/10: f"{i/10}" for i in range(0, 11)}
 		)
 	], style={'marginTop': '20px', 'marginBottom': '20px'}),
@@ -159,21 +151,18 @@ def update_heatmap(input_text, selected_layers, selected_heads, threshold):
 	- Selected layers and heads
 	
 	Args:
-		input_text (str): The input sentence provided by the user.
-		selected_layers (list): List of selected layer indices or 'all'.
-		selected_heads (list): List of selected head indices or 'all'.
-		threshold (float): The threshold value; attention weights below this value are set to zero.
+		input_text (str): The sentence input by the user.
+		selected_layers (list): List of selected Transformer layer indices.
+		selected_heads (list): List of selected attention head indices.
 
 	Returns:
 		fig (plotly.graph_objects.Figure): The updated subplot grid figure.
 	"""
-	# If "all" is selected for layers, set selected_layers to include all layer indices.
-	if 'all' in selected_layers:
-		selected_layers = list(range(NUM_LAYERS))
-	
-	# If "all" is selected for heads, set selected_heads to include all head indices.
-	if 'all' in selected_heads:
-		selected_heads = list(range(NUM_HEADS))
+	# Ensure that selected_layers and selected_heads are lists.
+	if not isinstance(selected_layers, list):
+		selected_layers = [selected_layers]
+	if not isinstance(selected_heads, list):
+		selected_heads = [selected_heads]
 	
 	# Determine the grid dimensions based on the number of selected layers and heads.
 	rows = len(selected_layers)
@@ -203,7 +192,7 @@ def update_heatmap(input_text, selected_layers, selected_heads, threshold):
 			# Add the heatmap trace to the correct subplot cell.
 			fig.add_trace(heatmap, row=i+1, col=j+1)
 	
-	# Update the overall layout of the figure.
+	# Update the overall layout of the figure, including title and dimensions.
 	fig.update_layout(
 		height=300 * rows, 
 		width=400 * cols,
@@ -213,7 +202,7 @@ def update_heatmap(input_text, selected_layers, selected_heads, threshold):
 	return fig
 
 # -------------------------------
-# STEP 5: RUN THE DASH APP
+# STEP 5: Run the Dash App
 # -------------------------------
 if __name__ == '__main__':
 	app.run_server(debug=True)
