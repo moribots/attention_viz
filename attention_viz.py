@@ -13,7 +13,7 @@ import numpy as np
 # Initialize the GPT-2 tokenizer to convert text into token IDs.
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 # Load the GPT-2 model with attention outputs enabled.
-# The 'output_attentions=True' flag ensures the model returns attention weights.
+# The 'output_attentions=True' flag ensures that the model returns attention weights.
 model = GPT2Model.from_pretrained('gpt2', output_attentions=True)
 model.eval()  # Set model to evaluation mode to disable dropout and other training-specific layers.
 
@@ -72,6 +72,13 @@ def get_attention_data(input_text, layer, head):
 app = dash.Dash(__name__)
 
 # Create app layout
+# Define dropdown options for layers with an option for selecting all layers.
+layer_options = [{'label': "All Layers", 'value': 'all'}] + \
+	[{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)]
+# Similarly for heads.
+head_options = [{'label': "All Heads", 'value': 'all'}] + \
+	[{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)]
+
 app.layout = html.Div([
 	# Title
 	html.H1("Attention Visualization"),
@@ -93,8 +100,8 @@ app.layout = html.Div([
 		html.Label("Select Layers:"),
 		dcc.Dropdown(
 			id="layer-dropdown",
-			options=[{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)],
-			value=[0],  # Default selection: Layer 0.
+			options=layer_options,
+			value=['all'],  # Default selection: All Layers.
 			multi=True,
 			clearable=False
 		)
@@ -106,8 +113,8 @@ app.layout = html.Div([
 		html.Label("Select Heads:"),
 		dcc.Dropdown(
 			id="head-dropdown",
-			options=[{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)],
-			value=[0],
+			options=head_options,
+			value=['all'],  # Default selection: All Heads.
 			multi=True,
 			clearable=False
 		)
@@ -118,7 +125,7 @@ app.layout = html.Div([
 ])
 
 # -------------------------------
-# STEP 4: Create a Callback to Update the Heatmap Dynamically
+# STEP 4: CREATE A CALLBACK TO UPDATE THE HEATMAP DYNAMICALLY
 # -------------------------------
 @app.callback(
 	Output("attention-heatmap", "figure"),  # The callback outputs a Plotly figure to the Graph component.
@@ -134,18 +141,20 @@ def update_heatmap(input_text, selected_layers, selected_heads):
 	
 	Args:
 		input_text (str): The sentence input by the user.
-		selected_layers (list): List of selected Transformer layer indices.
-		selected_heads (list): List of selected attention head indices.
+		selected_layers (list): List of selected Transformer layer indices or 'all'.
+		selected_heads (list): List of selected attention head indices or 'all'.
 
 	Returns:
 		fig (plotly.graph_objects.Figure): The updated figure with a subplot grid showing
 										   the attention heatmaps for each (layer, head) pair.
 	"""
-	# Ensure that selected_layers and selected_heads are lists.
-	if not isinstance(selected_layers, list):
-		selected_layers = [selected_layers]
-	if not isinstance(selected_heads, list):
-		selected_heads = [selected_heads]
+	# If "all" is selected in layers, set selected_layers to include all layer indices.
+	if 'all' in selected_layers:
+		selected_layers = list(range(NUM_LAYERS))
+	
+	# If "all" is selected in heads, set selected_heads to include all head indices.
+	if 'all' in selected_heads:
+		selected_heads = list(range(NUM_HEADS))
 	
 	# Determine the number of rows and columns for the subplot grid.
 	rows = len(selected_layers)
@@ -168,14 +177,14 @@ def update_heatmap(input_text, selected_layers, selected_heads):
 				z=attn_data,             # The 2D attention matrix.
 				x=tokens,                # Token labels for the x-axis.
 				y=tokens,                # Token labels for the y-axis.
-				colorscale='Viridis',    # Color scale for visualization.
+				colorscale='Viridis',    # Color scale for visualizing attention weights.
 				colorbar=dict(title="Attention Weight")
 			)
 			
-			# Add the heatmap trace to the appropriate subplot.
+			# Add the heatmap trace to the appropriate subplot cell.
 			fig.add_trace(heatmap, row=i+1, col=j+1)
 	
-	# Update the overall layout of the figure, including title and dimensions.
+	# Update the overall layout of the figure.
 	fig.update_layout(
 		height=300 * rows, 
 		width=400 * cols,
@@ -185,7 +194,7 @@ def update_heatmap(input_text, selected_layers, selected_heads):
 	return fig
 
 # -------------------------------
-# STEP 5: Run the Dash App
+# STEP 5: RUN THE DASH APP
 # -------------------------------
 if __name__ == '__main__':
 	app.run_server(debug=True)
