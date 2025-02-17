@@ -416,7 +416,7 @@ def evaluate_ablation(truncated_ids, baseline_probs, ablation_set, epsilon=1e-10
 	).item()
 	return kl_div
 
-def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3):
+def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10):
 	"""
 	Performs a greedy search over all candidate (layer, head) pairs to find a set of ablations
 	(up to max_heads in size) that maximizes the KL divergence between the baseline and ablated
@@ -459,66 +459,75 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3):
 # STEP 6: ABLATION STUDY CALLBACK
 # -------------------------------
 @app.callback(
-	Output("ablation-result", "children"),
-	[Input("run-ablation-study", "n_clicks")],
-	[State("input-text", "value"),
-	 State("attention-heatmap", "clickData")]
+    [Output("ablation-result", "children"),
+     Output("combo-dropdown", "value")],
+    [Input("run-ablation-study", "n_clicks")],
+    [State("input-text", "value"),
+     State("attention-heatmap", "clickData"),
+     State("combo-dropdown", "value")]
 )
-def run_ablation_study(n_clicks, input_text, clickData):
-	"""
-	When the "Run Ablation Study" button is clicked, this callback:
-	  - Re-tokenizes the input and finds the clicked token to define a truncated context.
-	  - Computes the baseline next-token probabilities.
-	  - Runs a greedy search over all (layer, head) candidates (up to a maximum number)
-		to find a set of ablations that maximizes the KL divergence between baseline and ablated predictions.
-	  - Displays the resulting ablation set and the KL divergence.
-	"""
-	if n_clicks is None or n_clicks == 0:
-		return "Click the button to run the ablation study for the clicked token."
-	
-	if clickData is None:
-		return "Click on a token in the heatmap before running the ablation study."
-	
-	try:
-		token_clicked = clickData["points"][0]["x"]
-	except (KeyError, IndexError):
-		return "Error retrieving token info from click data."
-	
-	# Re-tokenize the full input and find the index of the clicked token.
-	full_input_ids = tokenizer.encode(input_text, return_tensors="pt")
-	full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
-	try:
-		token_index = full_tokens.index(token_clicked)
-	except ValueError:
-		token_index = len(full_tokens) - 1
-	truncated_ids = full_input_ids[:, :token_index+1]
-	
-	# Compute baseline next-token probabilities.
-	with torch.no_grad():
-		baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
-	baseline_probs = torch.softmax(baseline_logits, dim=-1)
-	
-	# Run greedy search for best ablation combination (e.g., up to 3 heads).
-	best_set, best_kl = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3)
-	
-	# Create a summary table for the selected ablations.
-	table_rows = []
-	for (layer, head) in best_set:
-		table_rows.append(html.Tr([
-			html.Td(layer, style={'border': '1px solid black', 'padding': '4px'}),
-			html.Td(head, style={'border': '1px solid black', 'padding': '4px'})
-		]))
-	table = html.Table(
-		[html.Thead(html.Tr([html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
-							  html.Th("Head", style={'border': '1px solid black', 'padding': '4px'})])),
-		 html.Tbody(table_rows)],
-		style={'width': '100%', 'borderCollapse': 'collapse'}
-	)
-	
-	result_text = f"Best ablation combo (simultaneously ablating {len(best_set)} heads):"
-	result_text += f"\nKL Divergence: {best_kl:.4f}"
-	
-	return html.Div([html.Pre(result_text), table])
+def run_ablation_study(n_clicks, input_text, clickData, current_combos):
+    """
+    When the "Run Ablation Study" button is clicked, this callback:
+      - Re-tokenizes the input and finds the clicked token to define a truncated context.
+      - Computes the baseline next-token probabilities.
+      - Runs a greedy search over all (layer, head) candidates (up to a maximum number)
+        to find a set of ablations that maximizes the KL divergence between baseline and ablated predictions.
+      - Displays the resulting ablation set and the KL divergence.
+      - Forces the combo-dropdown to update with the best found ablation combos.
+    """
+    if n_clicks is None or n_clicks == 0:
+        # Return current combos unchanged
+        return "Click the button to run the ablation study for the clicked token.", current_combos
+    
+    if clickData is None:
+        return "Click on a token in the heatmap before running the ablation study.", current_combos
+    
+    try:
+        token_clicked = clickData["points"][0]["x"]
+    except (KeyError, IndexError):
+        return "Error retrieving token info from click data.", current_combos
+    
+    # Re-tokenize the full input and find the index of the clicked token.
+    full_input_ids = tokenizer.encode(input_text, return_tensors="pt")
+    full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
+    try:
+        token_index = full_tokens.index(token_clicked)
+    except ValueError:
+        token_index = len(full_tokens) - 1
+    truncated_ids = full_input_ids[:, :token_index+1]
+    
+    # Compute baseline next-token probabilities.
+    with torch.no_grad():
+        baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
+    baseline_probs = torch.softmax(baseline_logits, dim=-1)
+    
+    # Run greedy search for best ablation combination (e.g., up to 3 heads).
+    best_set, best_kl = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3)
+    
+    # Format the best set for display and update the combo-dropdown.
+    best_set_str = [f"{layer}-{head}" for (layer, head) in best_set]
+    
+    # Create a summary table for the selected ablations.
+    table_rows = []
+    for (layer, head) in best_set:
+        table_rows.append(html.Tr([
+            html.Td(layer, style={'border': '1px solid black', 'padding': '4px'}),
+            html.Td(head, style={'border': '1px solid black', 'padding': '4px'})
+        ]))
+    table = html.Table(
+        [html.Thead(html.Tr([html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
+                              html.Th("Head", style={'border': '1px solid black', 'padding': '4px'})])),
+         html.Tbody(table_rows)],
+        style={'width': '100%', 'borderCollapse': 'collapse'}
+    )
+    
+    result_text = f"Best ablation combo (simultaneously ablating {len(best_set)} heads):"
+    result_text += f"\nKL Divergence: {best_kl:.4f}"
+    
+    # Return the ablation result as well as update the combo-dropdown's value.
+    return html.Div([html.Pre(result_text), table]), best_set_str
+
 
 # -------------------------------
 # STEP 7: RUN THE DASH APP
