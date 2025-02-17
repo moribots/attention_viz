@@ -88,10 +88,11 @@ def get_attention_data(input_text, layer, head, threshold=0.0):
 # Initialize the Dash app with external Bootstrap stylesheet.
 app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 
-# Define dropdown options for layers (without "Select All" option).
-layer_options = [{'label': f"Layer {i}", 'value': i} for i in range(NUM_LAYERS)]
-# Define dropdown options for heads (without "Select All" option).
-head_options = [{'label': f"Head {i}", 'value': i} for i in range(NUM_HEADS)]
+layer_and_head_options=[
+			{'label': f"Layer {layer}, Head {head}", 'value': f"{layer}-{head}"}
+			for layer in range(NUM_LAYERS)
+			for head in range(NUM_HEADS)
+		]
 
 # Create a sidebar card with instructions.
 sidebar = dbc.Card(
@@ -131,26 +132,15 @@ main_content = dbc.Card(
 			], style={'marginBottom': '20px'}),
 			# Dropdown for selecting layers.
 			html.Div([
-				html.Label("Select Layers:"),
+				html.Label("Select Layer–Head Combos:"),
 				dcc.Dropdown(
-					id="layer-dropdown",
-					options=layer_options,
-					value=[0],
+					id="combo-dropdown",
+					options=layer_and_head_options,
+					value=["0-0"],  # default selection, adjust if needed
 					multi=True,
 					clearable=False
 				)
-			], style={'width': '45%', 'display': 'inline-block', 'marginRight': '20px'}),
-			# Dropdown for selecting heads.
-			html.Div([
-				html.Label("Select Heads:"),
-				dcc.Dropdown(
-					id="head-dropdown",
-					options=head_options,
-					value=[0],
-					multi=True,
-					clearable=False
-				)
-			], style={'width': '45%', 'display': 'inline-block'}),
+			], style={'width': '90%', 'marginBottom': '20px'}),
 			# Slider for dynamic filtering and thresholding.
 			html.Div([
 				html.Label("Attention Threshold (0.0 - 1.0):"),
@@ -181,8 +171,8 @@ main_content = dbc.Card(
 			html.Div(id="token-info", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'}),
 
 			# Button and Div for running the ablation study.
-            html.Button("Run Ablation Study", id="run-ablation-study", n_clicks=0),
-            html.Div(id="ablation-result", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'})
+			html.Button("Run Ablation Study", id="run-ablation-study", n_clicks=0),
+			html.Div(id="ablation-result", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'})
 
 		]
 	),
@@ -210,62 +200,60 @@ app.layout = dbc.Container(
 # STEP 4: CREATE A CALLBACK TO UPDATE THE HEATMAP
 # -------------------------------
 @app.callback(
-	Output("attention-heatmap", "figure"),  # The callback outputs a Plotly figure to the Graph component.
+	Output("attention-heatmap", "figure"),
 	[Input("input-text", "value"),
-	 Input("layer-dropdown", "value"),
-	 Input("head-dropdown", "value"),
+	 Input("combo-dropdown", "value"),
 	 Input("threshold-slider", "value")]
 )
-def update_heatmap(input_text, selected_layers, selected_heads, threshold):
+def update_heatmap(input_text, selected_combos, threshold):
 	"""
-	Callback that updates the attention heatmap based on user inputs:
+	Updates the attention heatmap based on user inputs:
 	- Input text
-	- Selected layers and heads
+	- Selected layer–head combination(s)
 	- Threshold for filtering attention weights
-	
-	Args:
-		input_text (str): The sentence input by the user.
-		selected_layers (list): List of selected Transformer layer indices.
-		selected_heads (list): List of selected attention head indices.
-
-	Returns:
-		fig (plotly.graph_objects.Figure): The updated subplot grid figure.
 	"""
-	# Ensure that selected_layers and selected_heads are lists.
-	if not isinstance(selected_layers, list):
-		selected_layers = [selected_layers]
-	if not isinstance(selected_heads, list):
-		selected_heads = [selected_heads]
+	# Ensure selected_combos is a list.
+	if not isinstance(selected_combos, list):
+		selected_combos = [selected_combos]
 	
-	# Determine grid dimensions based on selected layers and heads.
-	rows = len(selected_layers)
-	cols = len(selected_heads)
+	# Parse each combo into (layer, head)
+	combos = []
+	for combo in selected_combos:
+		try:
+			layer_str, head_str = combo.split("-")
+			combos.append((int(layer_str), int(head_str)))
+		except Exception:
+			continue
 	
-	# Create subplot titles for each (layer, head) pair.
-	subplot_titles = [f"Layer {layer}, Head {head}" for layer in selected_layers for head in selected_heads]
+	# Determine grid dimensions based on number of combos.
+	rows = len(combos)
+	cols = 1  # One column per combo.
+	
+	# Create subplot titles for each combo.
+	subplot_titles = [f"Layer {layer}, Head {head}" for layer, head in combos]
 	
 	# Create a subplot grid.
 	fig = make_subplots(rows=rows, cols=cols, subplot_titles=subplot_titles)
 	
-	# Loop over each selected layer and head.
-	for i, layer in enumerate(selected_layers):
-		for j, head in enumerate(selected_heads):
-			# Get filtered attention data and tokens for the given parameters.
-			attn_data, tokens = get_attention_data(input_text, layer, head, threshold)
-			
-			# Create a heatmap trace.
-			heatmap = go.Heatmap(
-				z=attn_data,
-				x=tokens,
-				y=tokens,
-				colorscale='Viridis',
-				colorbar=dict(title="Attention Weight")
-			)
-			
-			# Add the trace to the appropriate subplot cell.
-			fig.add_trace(heatmap, row=i+1, col=j+1)
+	# Loop over each selected combo.
+	for i, (layer, head) in enumerate(combos):
+		# Get filtered attention data and tokens for the given parameters.
+		attn_data, tokens = get_attention_data(input_text, layer, head, threshold)
+		
+		# Create a heatmap trace.
+		heatmap = go.Heatmap(
+			z=attn_data,
+			x=tokens,
+			y=tokens,
+			colorscale='Viridis',
+			colorbar=dict(title="Attention Weight")
+		)
+		
+		# Add the trace to the appropriate subplot cell.
+		fig.add_trace(heatmap, row=i+1, col=1)
 	
 	return fig
+
 
 def make_ablate_hook(selected_head):
 	"""
@@ -298,233 +286,239 @@ def make_ablate_hook(selected_head):
 # STEP 5: CREATE A CALLBACK TO UPDATE TOKEN INFO ON CLICK
 # -------------------------------
 @app.callback(
-    Output("token-info", "children"),
-    [Input("attention-heatmap", "clickData"),
-     Input("input-text", "value"),
-     Input("causal-intervention", "value"),
-     Input("layer-dropdown", "value"),
-     Input("head-dropdown", "value")]
+	Output("token-info", "children"),
+	[Input("attention-heatmap", "clickData"),
+	 Input("input-text", "value"),
+	 Input("causal-intervention", "value"),
+	 Input("combo-dropdown", "value")]
 )
-def update_token_info(clickData, input_text, causal_intervention, layer_dropdown, head_dropdown):
-    """
-    Callback that updates the token info Div based on a click event on the heatmap.
-    When a cell in the heatmap is clicked, it extracts the token from the 'x' value,
-    computes its token ID and embedding norm from the model's embedding layer, and displays 
-    this information along with deeper analysis metrics. The analysis includes baseline 
-    next-token predictions, and if causal intervention is enabled, ablated predictions,
-    KL divergence between the distributions, and whether the top prediction changed.
-    """
-    if clickData is None:
-        return "Click on a cell in the heatmap to see token information."
-    
-    try:
-        token_clicked = clickData["points"][0]["x"]
-    except (KeyError, IndexError):
-        return "Error retrieving token info from click data."
-    
-    token_id = tokenizer.convert_tokens_to_ids(token_clicked)
-    embedding = model.wte.weight[token_id]
-    embedding_norm = torch.norm(embedding).item()
-    info = f"Token: {token_clicked}\nToken ID: {token_id}\nEmbedding Norm: {embedding_norm:.4f}"
-    
-    # Re-tokenize the full input and find the index of the clicked token.
-    full_input_ids = tokenizer.encode(input_text, return_tensors='pt')
-    full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
-    try:
-        token_index = full_tokens.index(token_clicked)
-    except ValueError:
-        token_index = len(full_tokens) - 1
-    
-    # Use the context up to and including the clicked token.
-    truncated_ids = full_input_ids[:, :token_index+1]
-    
-    # ----- Compute Baseline Predictions (without intervention) -----
-    with torch.no_grad():
-        baseline_outputs = lm_model(truncated_ids)
-    baseline_logits = baseline_outputs.logits[0, -1, :]
-    baseline_probs = torch.softmax(baseline_logits, dim=-1)
-    baseline_topk = 5
-    baseline_top_probs, baseline_top_indices = torch.topk(baseline_probs, baseline_topk)
-    baseline_top_tokens = tokenizer.convert_ids_to_tokens(baseline_top_indices.tolist())
-    
-    baseline_info = "\n\nBaseline Next Token Predictions:\n"
-    for token, prob in zip(baseline_top_tokens, baseline_top_probs.tolist()):
-        baseline_info += f"{token}: {prob:.4f}\n"
-    
-    # ----- If Causal Intervention is Enabled, Compute Ablated Predictions -----
-    if 'ablate' in causal_intervention:
-        # Ensure layer_dropdown and head_dropdown are lists.
-        layer_list = layer_dropdown if isinstance(layer_dropdown, list) else [layer_dropdown]
-        head_list = head_dropdown if isinstance(head_dropdown, list) else [head_dropdown]
-        hook_handles = []
-        # Register hooks for every combination of selected layers and heads.
-        for layer in layer_list:
-            for head in head_list:
-                hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
-                    make_ablate_hook(head)
-                )
-                hook_handles.append(hook_handle)
-        with torch.no_grad():
-            ablated_outputs = lm_model(truncated_ids)
-        for handle in hook_handles:
-            handle.remove()
-            
-        ablated_logits = ablated_outputs.logits[0, -1, :]
-        ablated_probs = torch.softmax(ablated_logits, dim=-1)
-        ablated_topk = 5
-        ablated_top_probs, ablated_top_indices = torch.topk(ablated_probs, ablated_topk)
-        ablated_top_tokens = tokenizer.convert_ids_to_tokens(ablated_top_indices.tolist())
-        
-        ablated_info = "\n\nAblated Next Token Predictions:\n"
-        for token, prob in zip(ablated_top_tokens, ablated_top_probs.tolist()):
-            ablated_info += f"{token}: {prob:.4f}\n"
-        
-        # ----- Compute Deeper Analysis Metrics -----
-        # KL Divergence between baseline and ablated distributions.
-        # Add a small epsilon to avoid log(0)
-        epsilon = 1e-10
-        kl_div = torch.sum(baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))).item()
-        # Compare top predictions.
-        baseline_top_token = baseline_top_tokens[0]
-        ablated_top_token = ablated_top_tokens[0]
-        top_token_change = f"Top token changed from '{baseline_top_token}' to '{ablated_top_token}'" \
-                           if baseline_top_token != ablated_top_token else "Top token remains unchanged"
-        
-        deeper_metrics = "\n\nDeeper Analysis Metrics:\n"
-        deeper_metrics += f"KL Divergence: {kl_div:.4f}\n"
-        deeper_metrics += f"{top_token_change}\n"
-        
-        info += baseline_info + ablated_info + deeper_metrics
-    else:
-        info += baseline_info
-    
-    return html.Pre(info)
+def update_token_info(clickData, input_text, causal_intervention, combo_dropdown):
+	"""
+	Callback that updates the token info Div based on a click event on the heatmap.
+	When a cell in the heatmap is clicked, it extracts the token from the 'x' value,
+	computes its token ID and embedding norm from the model's embedding layer, and displays 
+	this information along with deeper analysis metrics. The analysis includes baseline 
+	next-token predictions, and if causal intervention is enabled, ablated predictions,
+	KL divergence between the distributions, and whether the top prediction changed.
+	Uses the selected layer–head combinations from combo-dropdown.
+	"""
+	if clickData is None:
+		return "Click on a cell in the heatmap to see token information."
+	
+	try:
+		token_clicked = clickData["points"][0]["x"]
+	except (KeyError, IndexError):
+		return "Error retrieving token info from click data."
+	
+	token_id = tokenizer.convert_tokens_to_ids(token_clicked)
+	embedding = model.wte.weight[token_id]
+	embedding_norm = torch.norm(embedding).item()
+	info = f"Token: {token_clicked}\nToken ID: {token_id}\nEmbedding Norm: {embedding_norm:.4f}"
+	
+	# Re-tokenize the full input and find the index of the clicked token.
+	full_input_ids = tokenizer.encode(input_text, return_tensors='pt')
+	full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
+	try:
+		token_index = full_tokens.index(token_clicked)
+	except ValueError:
+		token_index = len(full_tokens) - 1
+	
+	# Use the context up to and including the clicked token.
+	truncated_ids = full_input_ids[:, :token_index+1]
+	
+	# ----- Compute Baseline Predictions (without intervention) -----
+	with torch.no_grad():
+		baseline_outputs = lm_model(truncated_ids)
+	baseline_logits = baseline_outputs.logits[0, -1, :]
+	baseline_probs = torch.softmax(baseline_logits, dim=-1)
+	baseline_topk = 5
+	baseline_top_probs, baseline_top_indices = torch.topk(baseline_probs, baseline_topk)
+	baseline_top_tokens = tokenizer.convert_ids_to_tokens(baseline_top_indices.tolist())
+	
+	baseline_info = "\n\nBaseline Next Token Predictions:\n"
+	for token, prob in zip(baseline_top_tokens, baseline_top_probs.tolist()):
+		baseline_info += f"{token}: {prob:.4f}\n"
+	
+	# ----- If Causal Intervention is Enabled, Compute Ablated Predictions -----
+	if 'ablate' in causal_intervention:
+		# Ensure combo_dropdown is a list.
+		combo_list = combo_dropdown if isinstance(combo_dropdown, list) else [combo_dropdown]
+		hook_handles = []
+		# Register hooks for every selected layer–head combo.
+		for combo in combo_list:
+			try:
+				layer_str, head_str = combo.split("-")
+				layer = int(layer_str)
+				head = int(head_str)
+			except Exception:
+				continue
+			hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
+				make_ablate_hook(head)
+			)
+			hook_handles.append(hook_handle)
+		with torch.no_grad():
+			ablated_outputs = lm_model(truncated_ids)
+		for handle in hook_handles:
+			handle.remove()
+			
+		ablated_logits = ablated_outputs.logits[0, -1, :]
+		ablated_probs = torch.softmax(ablated_logits, dim=-1)
+		ablated_topk = 5
+		ablated_top_probs, ablated_top_indices = torch.topk(ablated_probs, ablated_topk)
+		ablated_top_tokens = tokenizer.convert_ids_to_tokens(ablated_top_indices.tolist())
+		
+		ablated_info = "\n\nAblated Next Token Predictions:\n"
+		for token, prob in zip(ablated_top_tokens, ablated_top_probs.tolist()):
+			ablated_info += f"{token}: {prob:.4f}\n"
+		
+		# ----- Compute Deeper Analysis Metrics -----
+		# KL Divergence between baseline and ablated distributions.
+		# Add a small epsilon to avoid log(0)
+		epsilon = 1e-10
+		kl_div = torch.sum(baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))).item()
+		# Compare top predictions.
+		baseline_top_token = baseline_top_tokens[0]
+		ablated_top_token = ablated_top_tokens[0]
+		top_token_change = (f"Top token changed from '{baseline_top_token}' to '{ablated_top_token}'"
+							if baseline_top_token != ablated_top_token 
+							else "Top token remains unchanged")
+		
+		deeper_metrics = "\n\nDeeper Analysis Metrics:\n"
+		deeper_metrics += f"KL Divergence: {kl_div:.4f}\n"
+		deeper_metrics += f"{top_token_change}\n"
+		
+		info += baseline_info + ablated_info + deeper_metrics
+	else:
+		info += baseline_info
+	
+	return html.Pre(info)
+
 
 def evaluate_ablation(truncated_ids, baseline_probs, ablation_set, epsilon=1e-10):
-    """
-    Applies all hooks corresponding to the ablation_set (a list of (layer, head) pairs),
-    runs the LM model on the truncated_ids, and computes the KL divergence between the baseline
-    probability distribution and the ablated one.
-    """
-    hook_handles = []
-    for (layer, head) in ablation_set:
-        hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
-            make_ablate_hook(head)
-        )
-        hook_handles.append(hook_handle)
-    with torch.no_grad():
-        ablated_logits = lm_model(truncated_ids).logits[0, -1, :]
-    for handle in hook_handles:
-        handle.remove()
-    ablated_probs = torch.softmax(ablated_logits, dim=-1)
-    kl_div = torch.sum(
-         baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))
-    ).item()
-    return kl_div
+	"""
+	Applies all hooks corresponding to the ablation_set (a list of (layer, head) pairs),
+	runs the LM model on the truncated_ids, and computes the KL divergence between the baseline
+	probability distribution and the ablated one.
+	"""
+	hook_handles = []
+	for (layer, head) in ablation_set:
+		hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
+			make_ablate_hook(head)
+		)
+		hook_handles.append(hook_handle)
+	with torch.no_grad():
+		ablated_logits = lm_model(truncated_ids).logits[0, -1, :]
+	for handle in hook_handles:
+		handle.remove()
+	ablated_probs = torch.softmax(ablated_logits, dim=-1)
+	kl_div = torch.sum(
+		 baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))
+	).item()
+	return kl_div
 
 def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3):
-    """
-    Performs a greedy search over all candidate (layer, head) pairs to find a set of ablations
-    (up to max_heads in size) that maximizes the KL divergence between the baseline and ablated
-    next-token prediction distributions.
-    
-    Returns:
-        best_set (list): A list of (layer, head) pairs.
-        best_kl (float): The corresponding KL divergence.
-    """
-    candidate_list = []
-    for layer in range(lm_model.config.n_layer):
-        for head in range(lm_model.config.n_head):
-            candidate_list.append((layer, head))
-    
-    best_set = []  # start with no ablation; baseline divergence is 0.
-    best_kl = evaluate_ablation(truncated_ids, baseline_probs, best_set)
-    
-    improved = True
-    while improved and len(best_set) < max_heads:
-        improved = False
-        best_candidate = None
-        candidate_kl = best_kl
-        # Wrap the candidate iteration with tqdm to show progress in terminal.
-        for candidate in tqdm(candidate_list, desc="Evaluating candidates", leave=False):
-            if candidate in best_set:
-                continue
-            test_set = best_set + [candidate]
-            kl = evaluate_ablation(truncated_ids, baseline_probs, test_set)
-            if kl > candidate_kl:
-                candidate_kl = kl
-                best_candidate = candidate
-                improved = True
-        if best_candidate is not None:
-            best_set.append(best_candidate)
-            best_kl = candidate_kl
-    return best_set, best_kl
+	"""
+	Performs a greedy search over all candidate (layer, head) pairs to find a set of ablations
+	(up to max_heads in size) that maximizes the KL divergence between the baseline and ablated
+	next-token prediction distributions.
+	
+	Returns:
+		best_set (list): A list of (layer, head) pairs.
+		best_kl (float): The corresponding KL divergence.
+	"""
+	candidate_list = []
+	for layer in range(lm_model.config.n_layer):
+		for head in range(lm_model.config.n_head):
+			candidate_list.append((layer, head))
+	
+	best_set = []  # start with no ablation; baseline divergence is 0.
+	best_kl = evaluate_ablation(truncated_ids, baseline_probs, best_set)
+	
+	improved = True
+	while improved and len(best_set) < max_heads:
+		improved = False
+		best_candidate = None
+		candidate_kl = best_kl
+		# Wrap the candidate iteration with tqdm to show progress in terminal.
+		for candidate in tqdm(candidate_list, desc="Evaluating candidates", leave=False):
+			if candidate in best_set:
+				continue
+			test_set = best_set + [candidate]
+			kl = evaluate_ablation(truncated_ids, baseline_probs, test_set)
+			if kl > candidate_kl:
+				candidate_kl = kl
+				best_candidate = candidate
+				improved = True
+		if best_candidate is not None:
+			best_set.append(best_candidate)
+			best_kl = candidate_kl
+	return best_set, best_kl
 
 
 # -------------------------------
 # STEP 6: ABLATION STUDY CALLBACK
 # -------------------------------
 @app.callback(
-    Output("ablation-result", "children"),
-    [Input("run-ablation-study", "n_clicks")],
-    [State("input-text", "value"),
-     State("attention-heatmap", "clickData")]
+	Output("ablation-result", "children"),
+	[Input("run-ablation-study", "n_clicks")],
+	[State("input-text", "value"),
+	 State("attention-heatmap", "clickData")]
 )
 def run_ablation_study(n_clicks, input_text, clickData):
-    """
-    When the "Run Ablation Study" button is clicked, this callback:
-      - Re-tokenizes the input and finds the clicked token to define a truncated context.
-      - Computes the baseline next-token probabilities.
-      - Runs a greedy search over all (layer, head) candidates (up to a maximum number)
-        to find a set of ablations that maximizes the KL divergence between baseline and ablated predictions.
-      - Displays the resulting ablation set and the KL divergence.
-    """
-    if n_clicks is None or n_clicks == 0:
-        return "Click the button to run the ablation study for the clicked token."
-    
-    if clickData is None:
-        return "Click on a token in the heatmap before running the ablation study."
-    
-    try:
-        token_clicked = clickData["points"][0]["x"]
-    except (KeyError, IndexError):
-        return "Error retrieving token info from click data."
-    
-    # Re-tokenize the full input and find the index of the clicked token.
-    full_input_ids = tokenizer.encode(input_text, return_tensors="pt")
-    full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
-    try:
-        token_index = full_tokens.index(token_clicked)
-    except ValueError:
-        token_index = len(full_tokens) - 1
-    truncated_ids = full_input_ids[:, :token_index+1]
-    
-    # Compute baseline next-token probabilities.
-    with torch.no_grad():
-        baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
-    baseline_probs = torch.softmax(baseline_logits, dim=-1)
-    
-    # Run greedy search for best ablation combination (e.g., up to 3 heads).
-    best_set, best_kl = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3)
-    
-    # Create a summary table for the selected ablations.
-    table_rows = []
-    for (layer, head) in best_set:
-        table_rows.append(html.Tr([
-            html.Td(layer, style={'border': '1px solid black', 'padding': '4px'}),
-            html.Td(head, style={'border': '1px solid black', 'padding': '4px'})
-        ]))
-    table = html.Table(
-        [html.Thead(html.Tr([html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
-                              html.Th("Head", style={'border': '1px solid black', 'padding': '4px'})])),
-         html.Tbody(table_rows)],
-        style={'width': '100%', 'borderCollapse': 'collapse'}
-    )
-    
-    result_text = f"Best ablation combo (simultaneously ablating {len(best_set)} heads):"
-    result_text += f"\nKL Divergence: {best_kl:.4f}"
-    
-    return html.Div([html.Pre(result_text), table])
+	"""
+	When the "Run Ablation Study" button is clicked, this callback:
+	  - Re-tokenizes the input and finds the clicked token to define a truncated context.
+	  - Computes the baseline next-token probabilities.
+	  - Runs a greedy search over all (layer, head) candidates (up to a maximum number)
+		to find a set of ablations that maximizes the KL divergence between baseline and ablated predictions.
+	  - Displays the resulting ablation set and the KL divergence.
+	"""
+	if n_clicks is None or n_clicks == 0:
+		return "Click the button to run the ablation study for the clicked token."
+	
+	if clickData is None:
+		return "Click on a token in the heatmap before running the ablation study."
+	
+	try:
+		token_clicked = clickData["points"][0]["x"]
+	except (KeyError, IndexError):
+		return "Error retrieving token info from click data."
+	
+	# Re-tokenize the full input and find the index of the clicked token.
+	full_input_ids = tokenizer.encode(input_text, return_tensors="pt")
+	full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
+	try:
+		token_index = full_tokens.index(token_clicked)
+	except ValueError:
+		token_index = len(full_tokens) - 1
+	truncated_ids = full_input_ids[:, :token_index+1]
+	
+	# Compute baseline next-token probabilities.
+	with torch.no_grad():
+		baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
+	baseline_probs = torch.softmax(baseline_logits, dim=-1)
+	
+	# Run greedy search for best ablation combination (e.g., up to 3 heads).
+	best_set, best_kl = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3)
+	
+	# Create a summary table for the selected ablations.
+	table_rows = []
+	for (layer, head) in best_set:
+		table_rows.append(html.Tr([
+			html.Td(layer, style={'border': '1px solid black', 'padding': '4px'}),
+			html.Td(head, style={'border': '1px solid black', 'padding': '4px'})
+		]))
+	table = html.Table(
+		[html.Thead(html.Tr([html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
+							  html.Th("Head", style={'border': '1px solid black', 'padding': '4px'})])),
+		 html.Tbody(table_rows)],
+		style={'width': '100%', 'borderCollapse': 'collapse'}
+	)
+	
+	result_text = f"Best ablation combo (simultaneously ablating {len(best_set)} heads):"
+	result_text += f"\nKL Divergence: {best_kl:.4f}"
+	
+	return html.Div([html.Pre(result_text), table])
 
 # -------------------------------
 # STEP 7: RUN THE DASH APP
