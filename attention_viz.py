@@ -9,6 +9,7 @@ from transformers import GPT2LMHeadModel  # Added for next-token predictions
 import numpy as np
 import dash_bootstrap_components as dbc  # For improved UI styling with Bootstrap.
 from dash.dependencies import State
+from tqdm import tqdm
 
 # Use Bootstrap stylesheet for better styling.
 external_stylesheets = [dbc.themes.BOOTSTRAP]
@@ -399,6 +400,66 @@ def update_token_info(clickData, input_text, causal_intervention, layer_dropdown
     
     return html.Pre(info)
 
+def evaluate_ablation(truncated_ids, baseline_probs, ablation_set, epsilon=1e-10):
+    """
+    Applies all hooks corresponding to the ablation_set (a list of (layer, head) pairs),
+    runs the LM model on the truncated_ids, and computes the KL divergence between the baseline
+    probability distribution and the ablated one.
+    """
+    hook_handles = []
+    for (layer, head) in ablation_set:
+        hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
+            make_ablate_hook(head)
+        )
+        hook_handles.append(hook_handle)
+    with torch.no_grad():
+        ablated_logits = lm_model(truncated_ids).logits[0, -1, :]
+    for handle in hook_handles:
+        handle.remove()
+    ablated_probs = torch.softmax(ablated_logits, dim=-1)
+    kl_div = torch.sum(
+         baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))
+    ).item()
+    return kl_div
+
+def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3):
+    """
+    Performs a greedy search over all candidate (layer, head) pairs to find a set of ablations
+    (up to max_heads in size) that maximizes the KL divergence between the baseline and ablated
+    next-token prediction distributions.
+    
+    Returns:
+        best_set (list): A list of (layer, head) pairs.
+        best_kl (float): The corresponding KL divergence.
+    """
+    candidate_list = []
+    for layer in range(lm_model.config.n_layer):
+        for head in range(lm_model.config.n_head):
+            candidate_list.append((layer, head))
+    
+    best_set = []  # start with no ablation; baseline divergence is 0.
+    best_kl = evaluate_ablation(truncated_ids, baseline_probs, best_set)
+    
+    improved = True
+    while improved and len(best_set) < max_heads:
+        improved = False
+        best_candidate = None
+        candidate_kl = best_kl
+        # Wrap the candidate iteration with tqdm to show progress in terminal.
+        for candidate in tqdm(candidate_list, desc="Evaluating candidates", leave=False):
+            if candidate in best_set:
+                continue
+            test_set = best_set + [candidate]
+            kl = evaluate_ablation(truncated_ids, baseline_probs, test_set)
+            if kl > candidate_kl:
+                candidate_kl = kl
+                best_candidate = candidate
+                improved = True
+        if best_candidate is not None:
+            best_set.append(best_candidate)
+            best_kl = candidate_kl
+    return best_set, best_kl
+
 
 # -------------------------------
 # STEP 6: ABLATION STUDY CALLBACK
@@ -411,9 +472,12 @@ def update_token_info(clickData, input_text, causal_intervention, layer_dropdown
 )
 def run_ablation_study(n_clicks, input_text, clickData):
     """
-    When the "Run Ablation Study" button is clicked, this callback iterates over all layer/head
-    combinations, computes the KL divergence between the baseline and ablated next-token distributions,
-    and displays a table of the top 10 results along with the best combination.
+    When the "Run Ablation Study" button is clicked, this callback:
+      - Re-tokenizes the input and finds the clicked token to define a truncated context.
+      - Computes the baseline next-token probabilities.
+      - Runs a greedy search over all (layer, head) candidates (up to a maximum number)
+        to find a set of ablations that maximizes the KL divergence between baseline and ablated predictions.
+      - Displays the resulting ablation set and the KL divergence.
     """
     if n_clicks is None or n_clicks == 0:
         return "Click the button to run the ablation study for the clicked token."
@@ -426,7 +490,7 @@ def run_ablation_study(n_clicks, input_text, clickData):
     except (KeyError, IndexError):
         return "Error retrieving token info from click data."
     
-    # Re-tokenize the input and find the index of the clicked token.
+    # Re-tokenize the full input and find the index of the clicked token.
     full_input_ids = tokenizer.encode(input_text, return_tensors="pt")
     full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
     try:
@@ -440,52 +504,27 @@ def run_ablation_study(n_clicks, input_text, clickData):
         baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
     baseline_probs = torch.softmax(baseline_logits, dim=-1)
     
-    results = []
-    epsilon = 1e-10
-    num_layers = lm_model.config.n_layer
-    num_heads = lm_model.config.n_head
+    # Run greedy search for best ablation combination (e.g., up to 3 heads).
+    best_set, best_kl = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=3)
     
-    # Iterate over all head/layer combinations.
-    for layer in range(num_layers):
-        for head in range(num_heads):
-            hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
-                make_ablate_hook(head)
-            )
-            with torch.no_grad():
-                ablated_logits = lm_model(truncated_ids).logits[0, -1, :]
-            hook_handle.remove()
-            ablated_probs = torch.softmax(ablated_logits, dim=-1)
-            kl_div = torch.sum(
-                baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))
-            ).item()
-            results.append((layer, head, kl_div))
-    
-    # Sort the results in descending order of KL divergence.
-    results_sorted = sorted(results, key=lambda x: x[2], reverse=True)
-    best_combo = results_sorted[0]
-    
-    # Create an HTML table to display the top 10 combinations.
-    table_header = [html.Thead(html.Tr([
-        html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
-        html.Th("Head", style={'border': '1px solid black', 'padding': '4px'}),
-        html.Th("KL Divergence", style={'border': '1px solid black', 'padding': '4px'})
-    ]))]
+    # Create a summary table for the selected ablations.
     table_rows = []
-    for row in results_sorted[:10]:
-        # Bold the best combination.
-        style = {'border': '1px solid black', 'padding': '4px', 'fontWeight': 'bold'} if row == best_combo else {'border': '1px solid black', 'padding': '4px'}
+    for (layer, head) in best_set:
         table_rows.append(html.Tr([
-            html.Td(row[0], style=style),
-            html.Td(row[1], style=style),
-            html.Td(f"{row[2]:.4f}", style=style)
+            html.Td(layer, style={'border': '1px solid black', 'padding': '4px'}),
+            html.Td(head, style={'border': '1px solid black', 'padding': '4px'})
         ]))
-    table_body = [html.Tbody(table_rows)]
-    table = html.Table(table_header + table_body, style={'width': '100%', 'borderCollapse': 'collapse'})
+    table = html.Table(
+        [html.Thead(html.Tr([html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
+                              html.Th("Head", style={'border': '1px solid black', 'padding': '4px'})])),
+         html.Tbody(table_rows)],
+        style={'width': '100%', 'borderCollapse': 'collapse'}
+    )
     
-    result_text = f"Best ablation combo: Layer {best_combo[0]}, Head {best_combo[1]} with KL divergence: {best_combo[2]:.4f}"
+    result_text = f"Best ablation combo (simultaneously ablating {len(best_set)} heads):"
+    result_text += f"\nKL Divergence: {best_kl:.4f}"
     
     return html.Div([html.Pre(result_text), table])
-
 
 # -------------------------------
 # STEP 7: RUN THE DASH APP
