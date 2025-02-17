@@ -8,6 +8,7 @@ from transformers import GPT2Tokenizer, GPT2Model  # Hugging Face Transformers f
 from transformers import GPT2LMHeadModel  # Added for next-token predictions
 import numpy as np
 import dash_bootstrap_components as dbc  # For improved UI styling with Bootstrap.
+from dash.dependencies import State
 
 # Use Bootstrap stylesheet for better styling.
 external_stylesheets = [dbc.themes.BOOTSTRAP]
@@ -161,7 +162,7 @@ main_content = dbc.Card(
 					marks={i/10: f"{i/10}" for i in range(0, 11)}
 				)
 			], style={'marginTop': '20px', 'marginBottom': '20px'}),
-			# New: Checkbox for causal intervention (ablate selected heads)
+			# Checkbox for causal intervention (ablate selected heads)
 			html.Div([
 				dcc.Checklist(
 					id="causal-intervention",
@@ -175,8 +176,13 @@ main_content = dbc.Card(
 				type="circle",
 				children=dcc.Graph(id="attention-heatmap")
 			),
-			# New: Div to display enhanced token info on click.
-			html.Div(id="token-info", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'})
+			# Div to display enhanced token info on click.
+			html.Div(id="token-info", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'}),
+
+			# Button and Div for running the ablation study.
+            html.Button("Run Ablation Study", id="run-ablation-study", n_clicks=0),
+            html.Div(id="ablation-result", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'})
+
 		]
 	),
 	style={"width": "100%"}
@@ -393,8 +399,96 @@ def update_token_info(clickData, input_text, causal_intervention, layer_dropdown
     
     return html.Pre(info)
 
+
 # -------------------------------
-# STEP 6: RUN THE DASH APP
+# STEP 6: ABLATION STUDY CALLBACK
+# -------------------------------
+@app.callback(
+    Output("ablation-result", "children"),
+    [Input("run-ablation-study", "n_clicks")],
+    [State("input-text", "value"),
+     State("attention-heatmap", "clickData")]
+)
+def run_ablation_study(n_clicks, input_text, clickData):
+    """
+    When the "Run Ablation Study" button is clicked, this callback iterates over all layer/head
+    combinations, computes the KL divergence between the baseline and ablated next-token distributions,
+    and displays a table of the top 10 results along with the best combination.
+    """
+    if n_clicks is None or n_clicks == 0:
+        return "Click the button to run the ablation study for the clicked token."
+    
+    if clickData is None:
+        return "Click on a token in the heatmap before running the ablation study."
+    
+    try:
+        token_clicked = clickData["points"][0]["x"]
+    except (KeyError, IndexError):
+        return "Error retrieving token info from click data."
+    
+    # Re-tokenize the input and find the index of the clicked token.
+    full_input_ids = tokenizer.encode(input_text, return_tensors="pt")
+    full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
+    try:
+        token_index = full_tokens.index(token_clicked)
+    except ValueError:
+        token_index = len(full_tokens) - 1
+    truncated_ids = full_input_ids[:, :token_index+1]
+    
+    # Compute baseline next-token probabilities.
+    with torch.no_grad():
+        baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
+    baseline_probs = torch.softmax(baseline_logits, dim=-1)
+    
+    results = []
+    epsilon = 1e-10
+    num_layers = lm_model.config.n_layer
+    num_heads = lm_model.config.n_head
+    
+    # Iterate over all head/layer combinations.
+    for layer in range(num_layers):
+        for head in range(num_heads):
+            hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
+                make_ablate_hook(head)
+            )
+            with torch.no_grad():
+                ablated_logits = lm_model(truncated_ids).logits[0, -1, :]
+            hook_handle.remove()
+            ablated_probs = torch.softmax(ablated_logits, dim=-1)
+            kl_div = torch.sum(
+                baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))
+            ).item()
+            results.append((layer, head, kl_div))
+    
+    # Sort the results in descending order of KL divergence.
+    results_sorted = sorted(results, key=lambda x: x[2], reverse=True)
+    best_combo = results_sorted[0]
+    
+    # Create an HTML table to display the top 10 combinations.
+    table_header = [html.Thead(html.Tr([
+        html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
+        html.Th("Head", style={'border': '1px solid black', 'padding': '4px'}),
+        html.Th("KL Divergence", style={'border': '1px solid black', 'padding': '4px'})
+    ]))]
+    table_rows = []
+    for row in results_sorted[:10]:
+        # Bold the best combination.
+        style = {'border': '1px solid black', 'padding': '4px', 'fontWeight': 'bold'} if row == best_combo else {'border': '1px solid black', 'padding': '4px'}
+        table_rows.append(html.Tr([
+            html.Td(row[0], style=style),
+            html.Td(row[1], style=style),
+            html.Td(f"{row[2]:.4f}", style=style)
+        ]))
+    table_body = [html.Tbody(table_rows)]
+    table = html.Table(table_header + table_body, style={'width': '100%', 'borderCollapse': 'collapse'})
+    
+    result_text = f"Best ablation combo: Layer {best_combo[0]}, Head {best_combo[1]} with KL divergence: {best_combo[2]:.4f}"
+    
+    return html.Div([html.Pre(result_text), table])
+
+
+# -------------------------------
+# STEP 7: RUN THE DASH APP
 # -------------------------------
 if __name__ == '__main__':
 	app.run_server(debug=True)
