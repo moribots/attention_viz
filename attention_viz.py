@@ -67,12 +67,65 @@ def make_ablate_hook(selected_head, scale=0.0):
 			return output_clone
 	return hook
 
-def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, scale=0.0, epsilon=1e-10):
+# -------------------------------
+# New Ablation Techniques
+# -------------------------------
+def make_permutation_hook(selected_head):
+	"""
+	Permutation Ablation: Shuffle the outputs of the selected head along the token dimension.
+	"""
+	def hook(module, input, output):
+		head_dim = lm_model.config.hidden_size // lm_model.config.n_head
+		start = selected_head * head_dim
+		end = start + head_dim
+		if isinstance(output, tuple):
+			attn_output = output[0]
+			attn_output_clone = attn_output.clone()
+			for i in range(attn_output_clone.size(0)):
+				perm = torch.randperm(attn_output_clone.size(1))
+				attn_output_clone[i, :, start:end] = attn_output_clone[i, perm, start:end]
+			return (attn_output_clone,) + output[1:]
+		else:
+			output_clone = output.clone()
+			for i in range(output_clone.size(0)):
+				perm = torch.randperm(output_clone.size(1))
+				output_clone[i, :, start:end] = output_clone[i, perm, start:end]
+			return output_clone
+	return hook
+
+def make_sparsification_hook(selected_head, sparsity_threshold):
+	"""
+	Structured Sparsification: Zero out values in the selected head's output that are below the sparsity_threshold.
+	"""
+	def hook(module, input, output):
+		head_dim = lm_model.config.hidden_size // lm_model.config.n_head
+		start = selected_head * head_dim
+		end = start + head_dim
+		if isinstance(output, tuple):
+			attn_output = output[0]
+			attn_output_clone = attn_output.clone()
+			mask = torch.abs(attn_output_clone[:, :, start:end]) < sparsity_threshold
+			attn_output_clone[:, :, start:end] = attn_output_clone[:, :, start:end].masked_fill(mask, 0)
+			return (attn_output_clone,) + output[1:]
+		else:
+			output_clone = output.clone()
+			mask = torch.abs(output_clone[:, :, start:end]) < sparsity_threshold
+			output_clone[:, :, start:end] = output_clone[:, :, start:end].masked_fill(mask, 0)
+			return output_clone
+	return hook
+
+def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, scale=0.0, ablation_method='standard', sparsity_threshold=0.1, epsilon=1e-10):
 	hook_handles = []
 	for (layer, head) in ablation_set:
-		hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
-			make_ablate_hook(head, scale=scale)
-		)
+		if ablation_method == 'standard':
+			hook = make_ablate_hook(head, scale=scale)
+		elif ablation_method == 'permute':
+			hook = make_permutation_hook(head)
+		elif ablation_method == 'sparsify':
+			hook = make_sparsification_hook(head, sparsity_threshold)
+		else:
+			hook = make_ablate_hook(head, scale=scale)
+		hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(hook)
 		hook_handles.append(hook_handle)
 	with torch.no_grad():
 		ablated_logits = lm_model(truncated_ids).logits[0, -1, :]
@@ -85,13 +138,13 @@ def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, scale=0.0, e
 	combined_score = alpha * kl_div + beta * delta_top_prob
 	return combined_score
 
-def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=0.0, progress_callback=None):
+def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=0.0, ablation_method='standard', sparsity_threshold=0.1, progress_callback=None):
 	candidate_list = [(layer, head) for layer in range(lm_model.config.n_layer) for head in range(lm_model.config.n_head)]
 	candidate_scores = []
 	total_candidates = len(candidate_list)
 	# Evaluate each candidate and update progress (scaled to 0-40%)
 	for idx, candidate in enumerate(candidate_list):
-		score = evaluate_candidate(truncated_ids, baseline_probs, [candidate], scale=scale)
+		score = evaluate_candidate(truncated_ids, baseline_probs, [candidate], scale=scale, ablation_method=ablation_method, sparsity_threshold=sparsity_threshold)
 		candidate_scores.append((candidate, score))
 		if progress_callback is not None:
 			progress_callback(int((idx + 1) / total_candidates * 40))
@@ -100,7 +153,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=
 	preselected = [cand for cand, _ in candidate_scores[:max(1, len(candidate_scores)//5)]]
 
 	best_set = []
-	best_score = evaluate_candidate(truncated_ids, baseline_probs, best_set, scale=scale)
+	best_score = evaluate_candidate(truncated_ids, baseline_probs, best_set, scale=scale, ablation_method=ablation_method, sparsity_threshold=sparsity_threshold)
 	improved = True
 	iteration_count = 0
 	total_iterations = len(preselected) + 1  # heuristic for scaling progress in the while loop
@@ -112,7 +165,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=
 			if candidate in best_set:
 				continue
 			test_set = best_set + [candidate]
-			score = evaluate_candidate(truncated_ids, baseline_probs, test_set, scale=scale)
+			score = evaluate_candidate(truncated_ids, baseline_probs, test_set, scale=scale, ablation_method=ablation_method, sparsity_threshold=sparsity_threshold)
 			if score > candidate_score:
 				candidate_score = score
 				best_candidate = candidate
@@ -182,9 +235,22 @@ main_content = dbc.Card(
 		], style={'marginTop': '20px', 'marginBottom': '20px'}),
 
 		html.Div([
-			dcc.Checklist(id="causal-intervention",
-						  options=[{'label': 'Enable Causal Tracing (Ablate Selected Heads)', 'value': 'ablate'}],
-						  value=[])
+			html.Label("Sparsity Threshold (for Structured Sparsification):"),
+			dcc.Slider(id="sparsity-threshold-slider", min=0.0, max=1.0, step=0.01, value=0.1,
+					   marks={i/10: f"{i/10}" for i in range(0, 11)})
+		], style={'marginTop': '20px', 'marginBottom': '20px'}),
+
+		html.Div([
+			dcc.RadioItems(
+				id="causal-intervention",
+				options=[
+					{'label': 'None', 'value': 'none'},
+					{'label': 'Standard Ablation', 'value': 'standard'},
+					{'label': 'Permutation Ablation', 'value': 'permute'},
+					{'label': 'Structured Sparsification', 'value': 'sparsify'}
+				],
+				value='none'
+			)
 		], style={'marginTop': '20px', 'marginBottom': '20px'}),
 
 		# Add Prev/Next buttons and a Store to track the current page of combos
@@ -385,9 +451,10 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 	 Input("input-text", "value"),
 	 Input("causal-intervention", "value"),
 	 Input("combo-dropdown", "value"),
-	 Input("ablation-scale-slider", "value")]
+	 Input("ablation-scale-slider", "value"),
+		 Input("sparsity-threshold-slider", "value")]
 )
-def update_token_info(clickData, input_text, causal_intervention, combo_dropdown, ablation_scale):
+def update_token_info(clickData, input_text, causal_intervention, combo_dropdown, ablation_scale, sparsity_threshold):
 	if clickData is None:
 		return "Click on a cell in the heatmap to see token information."
 	try:
@@ -421,7 +488,8 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 	for token, prob in zip(baseline_top_tokens, baseline_top_probs.tolist()):
 		baseline_info += f"{token}: {prob:.4f}\n"
 
-	if 'ablate' in causal_intervention:
+	ablation_method = causal_intervention if not isinstance(causal_intervention, list) else (causal_intervention[0] if causal_intervention else 'none')
+	if ablation_method != 'none':
 		combo_list = combo_dropdown if isinstance(combo_dropdown, list) else [combo_dropdown]
 		hook_handles = []
 		for combo in combo_list:
@@ -431,9 +499,15 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 				head = int(head_str)
 			except Exception:
 				continue
-			hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(
-				make_ablate_hook(head, scale=ablation_scale)
-			)
+			if ablation_method == 'standard':
+				hook = make_ablate_hook(head, scale=ablation_scale)
+			elif ablation_method == 'permute':
+				hook = make_permutation_hook(head)
+			elif ablation_method == 'sparsify':
+				hook = make_sparsification_hook(head, sparsity_threshold)
+			else:
+				hook = make_ablate_hook(head, scale=ablation_scale)
+			hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(hook)
 			hook_handles.append(hook_handle)
 
 		with torch.no_grad():
@@ -484,13 +558,15 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 	state=[State("input-text", "value"),
 		   State("attention-heatmap", "clickData"),
 		   State("combo-dropdown", "value"),
-		   State("ablation-scale-slider", "value")],
+		   State("ablation-scale-slider", "value"),
+				   State("causal-intervention", "value"),
+				   State("sparsity-threshold-slider", "value")],
 	progress=[Output("ablation-progress", "value")],
 	running=[(Output("run-ablation-study", "disabled"), True, False)],
 	manager=long_callback_manager,
 	prevent_initial_call=True
 )
-def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos, ablation_scale):
+def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos, ablation_scale, causal_intervention, sparsity_threshold):
 	if clickData is None:
 		return "Click on a token in the heatmap before running the ablation study.", current_combos
 
@@ -511,7 +587,8 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 		baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
 	baseline_probs = torch.softmax(baseline_logits, dim=-1)
 
-	best_set, best_score = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=ablation_scale, progress_callback=progress)
+	ablation_method = causal_intervention if not isinstance(causal_intervention, list) else (causal_intervention[0] if causal_intervention else 'none')
+	best_set, best_score = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=ablation_scale, ablation_method=ablation_method, sparsity_threshold=sparsity_threshold, progress_callback=progress)
 	progress(100)
 
 	best_set_str = [f"{layer}-{head}" for (layer, head) in best_set]
