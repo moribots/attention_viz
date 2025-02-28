@@ -24,6 +24,8 @@ long_callback_manager = DiskcacheLongCallbackManager(cache)
 
 external_stylesheets = [dbc.themes.BOOTSTRAP]
 
+NUM_COMBOS = 4
+
 # -------------------------------
 # Load the model and tokenizer
 # -------------------------------
@@ -193,8 +195,19 @@ main_content = dbc.Card(
 			dcc.Store(id="page-store", data=0)  # Store the current "page" of combos
 		], style={'marginBottom': '20px'}),
 
-		dcc.Loading(id="loading-graph", type="circle",
-					children=dcc.Graph(id="attention-heatmap")),
+		dcc.Loading(
+			id="loading-graph",
+			type="circle",
+			children=dcc.Graph(
+				id="attention-heatmap",
+				style={
+					"width": "100%",       # let it expand horizontally
+					"minHeight": "700px",  # decent vertical space
+					# "overflowX": "auto"    # scroll horizontally if wide
+				}
+			)
+		),
+		
 
 		html.Div(id="token-info", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'}),
 
@@ -225,20 +238,18 @@ app.layout = dbc.Container([
 def update_page(prev_clicks, next_clicks, combos, current_page):
 	"""
 	Adjust the page index based on which button is clicked.
-	We show up to 4 combos per page.
+	We show up to 10 combos per page.
 	"""
 	if not combos:
 		return 0
 
-	# Figure out which button triggered
 	ctx = dash.callback_context
 	if not ctx.triggered:
 		return current_page
 	button_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
-	# Number of pages
 	import math
-	page_size = 4
+	page_size = NUM_COMBOS
 	total_pages = max(1, math.ceil(len(combos) / page_size))
 
 	new_page = current_page
@@ -264,6 +275,8 @@ def update_page(prev_clicks, next_clicks, combos, current_page):
 	 Input("page-store", "data")]  # Use current page to pick which combos to show
 )
 def update_heatmap(input_text, selected_combos, threshold, current_page):
+	import math
+
 	if not isinstance(selected_combos, list):
 		selected_combos = [selected_combos]
 	combos = []
@@ -274,19 +287,43 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 		except Exception:
 			continue
 
-	# Show only 4 combos per page
-	page_size = 4
+	page_size = NUM_COMBOS
 	start_idx = current_page * page_size
 	end_idx = start_idx + page_size
 	combos_on_this_page = combos[start_idx:end_idx]
 
-	# We'll place them in a 2x2 grid
-	# The number of combos is up to 4, so we build subplot titles accordingly
+	n = len(combos_on_this_page)
+	if n == 0:
+		# If there are no combos, just display a simple message
+		fig = go.Figure()
+		fig.add_annotation(text="No combos selected.", showarrow=False)
+		fig.update_layout(height=400, margin=dict(l=20, r=20, t=40, b=20))
+		return fig
+
+	# Decide rows/cols to handle up to 10 combos with minimal whitespace
+	# (Feel free to adjust this logic if you prefer a fixed layout)
+	if n <= 2:
+		rows, cols = 1, n
+	elif n <= 4:
+		rows, cols = 2, 2
+
+	# Create subplot titles
 	subplot_titles = [f"Layer {layer}, Head {head}" for (layer, head) in combos_on_this_page]
+	total_subplots = rows * cols
+	# Pad titles if fewer than rows*cols
+	while len(subplot_titles) < total_subplots:
+		subplot_titles.append("")
 
-	# Always create 2 rows x 2 cols, but we might fill fewer than 4
-	fig = make_subplots(rows=2, cols=2, subplot_titles=subplot_titles)
+	# Create subplots with minimal spacing
+	fig = make_subplots(
+		rows=rows,
+		cols=cols,
+		subplot_titles=subplot_titles,
+		horizontal_spacing=0.2,  # reduce horizontal gap
+		vertical_spacing=0.05     # reduce vertical gap
+	)
 
+	# Add each heatmap
 	for i, (layer, head) in enumerate(combos_on_this_page):
 		attn_data, tokens = get_attention_data(input_text, layer, head, threshold)
 		heatmap = go.Heatmap(
@@ -297,27 +334,46 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 			colorbar=dict(title="Attention Weight"),
 			hovertemplate="From Token: %{y}<br>To Token: %{x}<br>Attention: %{z:.4f}<extra></extra>"
 		)
-		row = (i // 2) + 1
-		col = (i % 2) + 1
+		row = (i // cols) + 1
+		col = (i % cols) + 1
 		fig.add_trace(heatmap, row=row, col=col)
 
 	# Force each subplot to have a square aspect ratio
-	# We'll do it by linking each y-axis to its corresponding x-axis
-	# i.e. yaxis1.scaleanchor = "x1", etc.
-	for i in range(1, 5):
-		# The first subplot uses "xaxis"/"yaxis" in the layout
-		# The second subplot uses "xaxis2"/"yaxis2", etc.
-		xaxis_key = "xaxis" if i == 1 else f"xaxis{i}"
-		yaxis_key = "yaxis" if i == 1 else f"yaxis{i}"
-
+	for subplot_index in range(1, total_subplots + 1):
+		xaxis_key = "xaxis" if subplot_index == 1 else f"xaxis{subplot_index}"
+		yaxis_key = "yaxis" if subplot_index == 1 else f"yaxis{subplot_index}"
 		if xaxis_key in fig.layout and yaxis_key in fig.layout:
-			# For subplot 1, scaleanchor must be "x"
-			# For subplot 2, scaleanchor must be "x2", etc.
-			scaleanchor_val = "x" if i == 1 else f"x{i}"
+			scaleanchor_val = "x" if subplot_index == 1 else f"x{subplot_index}"
 			fig.layout[yaxis_key].scaleanchor = scaleanchor_val
 			fig.layout[yaxis_key].scaleratio = 1
 
-	fig.update_layout(height=800, width=800)  # Adjust as you like
+	# -----------------------------------------------------------------
+	# 1) We'll let the figure fill 100% of the container's width.
+	# 2) We compute the figure's height from the grid aspect ratio:
+	#    - If each subplot is a square, total aspect ratio = (cols / rows).
+	#    - We set width = 100% in dcc.Graph, but we need a "placeholder" numeric
+	#      width in fig for the ratio calc. We'll guess ~ 1000px for the base.
+	#    - Then height = (width * rows / cols).
+	# 3) If the container is bigger or smaller, the figure will scale up/down,
+	#    preserving squares. Some leftover space is possible if container
+	#    ratio doesn't match the grid ratio, but each subplot stays square.
+	# -----------------------------------------------------------------
+	base_width = 1300
+	fig_width = base_width
+	# Keep squares => total figure ratio = (cols / rows)
+	# So height = width * (rows / cols)
+	if rows < 2 :
+		fig_height = fig_width / (3.0 + 1.0 / 3.0)
+	else:
+		fig_height = fig_width * (rows / cols)
+
+	fig.update_layout(
+		autosize=True,
+		width=fig_width,
+		height=fig_height,
+		margin=dict(l=0, r=0, t=50, b=0),
+		paper_bgcolor="white"
+	)
 	return fig
 
 # -------------------------------
