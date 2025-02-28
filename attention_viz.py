@@ -1,30 +1,27 @@
 import multiprocessing as mp
-# Set the start method to 'fork' to avoid pickling issues on Unix/Linux.
 try:
 	mp.set_start_method('fork', force=True)
 except RuntimeError:
 	pass
 
-import dash  # For building the web interface
-from dash import dcc, html  # Core components and HTML
-from dash.dependencies import Input, Output, State  # Callbacks
+import dash
+from dash import dcc, html
+from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots 
+from plotly.subplots import make_subplots
 import torch
-from transformers import GPT2Tokenizer, GPT2Model  # Pre-trained model and tokenizer from Hugging Face
-from transformers import GPT2LMHeadModel  # For next-token predictions
+from transformers import GPT2Tokenizer, GPT2Model
+from transformers import GPT2LMHeadModel
 import numpy as np
-import dash_bootstrap_components as dbc  # For styling with Bootstrap
+import dash_bootstrap_components as dbc
 from tqdm import tqdm
 
-import diskcache  # For caching long computations
-from dash.long_callback import DiskcacheLongCallbackManager  # To manage long callbacks
+import diskcache
+from dash.long_callback import DiskcacheLongCallbackManager
 
-# Create a diskcache instance and long callback manager.
 cache = diskcache.Cache("./cache")
 long_callback_manager = DiskcacheLongCallbackManager(cache)
 
-# Use Bootstrap for styling.
 external_stylesheets = [dbc.themes.BOOTSTRAP]
 
 # -------------------------------
@@ -39,7 +36,7 @@ NUM_LAYERS = model.config.n_layer
 NUM_HEADS = model.config.n_head
 
 # -------------------------------
-# Function to extract and filter attention data
+# Utility functions
 # -------------------------------
 def get_attention_data(input_text, layer, head, threshold=0.0):
 	input_ids = tokenizer.encode(input_text, return_tensors='pt')
@@ -52,10 +49,6 @@ def get_attention_data(input_text, layer, head, threshold=0.0):
 	filtered_attn_data = np.where(attn_data >= threshold, attn_data, 0)
 	return filtered_attn_data, tokens
 
-# -------------------------------
-# Ablation hook that scales head output instead of zeroing it completely.
-# A scale of 0.0 means full ablation; a value between 0 and 1 gives partial ablation.
-# -------------------------------
 def make_ablate_hook(selected_head, scale=0.0):
 	def hook(module, input, output):
 		head_dim = lm_model.config.hidden_size // lm_model.config.n_head
@@ -72,10 +65,6 @@ def make_ablate_hook(selected_head, scale=0.0):
 			return output_clone
 	return hook
 
-# -------------------------------
-# Evaluate the impact of ablating a set of heads.
-# Returns a combined score that uses both KL divergence and the change in top token probability.
-# -------------------------------
 def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, scale=0.0, epsilon=1e-10):
 	hook_handles = []
 	for (layer, head) in ablation_set:
@@ -90,27 +79,22 @@ def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, scale=0.0, e
 	ablated_probs = torch.softmax(ablated_logits, dim=-1)
 	kl_div = torch.sum(baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))).item()
 	delta_top_prob = baseline_probs.max().item() - ablated_probs.max().item()
-	# We weight the KL divergence and the change in top probability equally here; adjust if needed.
 	alpha, beta = 1.0, 1.0
 	combined_score = alpha * kl_div + beta * delta_top_prob
 	return combined_score
 
-# -------------------------------
-# Improved ablation search that uses a combined score and pre-selects candidates.
-# -------------------------------
 def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=0.0):
 	candidate_list = [(layer, head) for layer in range(lm_model.config.n_layer) for head in range(lm_model.config.n_head)]
-	
-	# Pre-select top candidates based on their individual score (taking the top 20%).
 	candidate_scores = []
 	for candidate in candidate_list:
 		score = evaluate_candidate(truncated_ids, baseline_probs, [candidate], scale=scale)
 		candidate_scores.append((candidate, score))
 	candidate_scores.sort(key=lambda x: x[1], reverse=True)
+	# Pre-select top 20%
 	preselected = [cand for cand, _ in candidate_scores[:max(1, len(candidate_scores)//5)]]
-	
-	best_set = []  
-	best_score = evaluate_candidate(truncated_ids, baseline_probs, best_set, scale=scale)  # Score for empty set, usually 0.
+
+	best_set = []
+	best_score = evaluate_candidate(truncated_ids, baseline_probs, best_set, scale=scale)
 	improved = True
 	while improved and len(best_set) < max_heads:
 		improved = False
@@ -131,26 +115,31 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=
 	return best_set, best_score
 
 # -------------------------------
-# Build the Dash app layout
+# Build the Dash app
 # -------------------------------
-app = dash.Dash(__name__, external_stylesheets=external_stylesheets, 
+app = dash.Dash(__name__, external_stylesheets=external_stylesheets,
 				long_callback_manager=long_callback_manager)
+
 layer_and_head_options = [
 	{'label': f"Layer {layer}, Head {head}", 'value': f"{layer}-{head}"}
 	for layer in range(NUM_LAYERS)
 	for head in range(NUM_HEADS)
 ]
+
 sidebar = dbc.Card(
-	[dbc.CardHeader("Instructions"),
-	 dbc.CardBody([
-		 html.P("- You can modify the input text on the right.", className="card-text"),
-		 html.P("- Select one or more layer-head pairs to view their attention heatmaps.", className="card-text"),
-		 html.P("- Use the slider to set a threshold and filter weak attention links.", className="card-text"),
-		 html.P("- Click a cell in any heatmap to view details about that token.", className="card-text"),
-		 html.P("- Ablation (causal tracing) lets you see how head removal changes predictions.", className="card-text")
-	 ])],
+	[
+		dbc.CardHeader("Instructions"),
+		dbc.CardBody([
+			html.P("- You can modify the input text on the right.", className="card-text"),
+			html.P("- Select one or more layer-head pairs to view their attention heatmaps.", className="card-text"),
+			html.P("- Use the slider to set a threshold and filter weak attention links.", className="card-text"),
+			html.P("- Click a cell in any heatmap to view details about that token.", className="card-text"),
+			html.P("- Ablation (causal tracing) lets you see how head removal changes predictions.", className="card-text")
+		])
+	],
 	style={"width": "100%", "marginBottom": "20px"}
 )
+
 main_content = dbc.Card(
 	dbc.CardBody([
 		html.Div([
@@ -159,6 +148,7 @@ main_content = dbc.Card(
 					  value="The quick brown fox jumps over the lazy dog.",
 					  style={'width': '100%'})
 		], style={'marginBottom': '20px'}),
+
 		html.Div([
 			html.Label("Select Layer–Head Combos:"),
 			dcc.Dropdown(id="combo-dropdown",
@@ -166,25 +156,38 @@ main_content = dbc.Card(
 						 value=["0-0"],
 						 multi=True, clearable=False)
 		], style={'width': '90%', 'marginBottom': '20px'}),
+
 		html.Div([
 			html.Label("Attention Threshold (0.0 - 1.0):"),
 			dcc.Slider(id="threshold-slider", min=0.0, max=1.0, step=0.01, value=0.0,
 					   marks={i/10: f"{i/10}" for i in range(0, 11)})
 		], style={'marginTop': '20px', 'marginBottom': '20px'}),
-		# New slider for setting the ablation scale factor.
+
 		html.Div([
 			html.Label("Ablation Scale Factor (0.0 = full ablation, 1.0 = no ablation):"),
 			dcc.Slider(id="ablation-scale-slider", min=0.0, max=1.0, step=0.01, value=0.0,
 					   marks={i/10: f"{i/10}" for i in range(0, 11)})
 		], style={'marginTop': '20px', 'marginBottom': '20px'}),
+
 		html.Div([
 			dcc.Checklist(id="causal-intervention",
 						  options=[{'label': 'Enable Causal Tracing (Ablate Selected Heads)', 'value': 'ablate'}],
 						  value=[])
 		], style={'marginTop': '20px', 'marginBottom': '20px'}),
+
+		# Add Prev/Next buttons and a Store to track the current page of combos
+		html.Div([
+			html.Button("Previous Page", id="prev-page-btn", n_clicks=0,
+						style={'marginRight': '10px'}),
+			html.Button("Next Page", id="next-page-btn", n_clicks=0),
+			dcc.Store(id="page-store", data=0)  # Store the current "page" of combos
+		], style={'marginBottom': '20px'}),
+
 		dcc.Loading(id="loading-graph", type="circle",
 					children=dcc.Graph(id="attention-heatmap")),
+
 		html.Div(id="token-info", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'}),
+
 		html.Button("Run Ablation Study", id="run-ablation-study", n_clicks=0),
 		dbc.Progress(id="ablation-progress", striped=True, animated=True,
 					 style={'marginTop': '20px', 'height': '20px'}),
@@ -192,6 +195,7 @@ main_content = dbc.Card(
 	]),
 	style={"width": "100%"}
 )
+
 app.layout = dbc.Container([
 	dbc.Row(dbc.Col(html.H1("Interactive Attention Visualization"), width=12),
 			style={"marginTop": "20px", "marginBottom": "20px"}),
@@ -199,15 +203,57 @@ app.layout = dbc.Container([
 ], fluid=True)
 
 # -------------------------------
-# Callback to update the attention heatmap based on user input
+# Callback to change page when Prev/Next are clicked
+# -------------------------------
+@app.callback(
+	Output("page-store", "data"),
+	[Input("prev-page-btn", "n_clicks"),
+	 Input("next-page-btn", "n_clicks")],
+	[State("combo-dropdown", "value"),
+	 State("page-store", "data")]
+)
+def update_page(prev_clicks, next_clicks, combos, current_page):
+	"""
+	Adjust the page index based on which button is clicked.
+	We show up to 4 combos per page.
+	"""
+	if not combos:
+		return 0
+
+	# Figure out which button triggered
+	ctx = dash.callback_context
+	if not ctx.triggered:
+		return current_page
+	button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
+	# Number of pages
+	import math
+	page_size = 4
+	total_pages = max(1, math.ceil(len(combos) / page_size))
+
+	new_page = current_page
+	if button_id == "next-page-btn":
+		new_page = current_page + 1
+		if new_page >= total_pages:
+			new_page = total_pages - 1
+	elif button_id == "prev-page-btn":
+		new_page = current_page - 1
+		if new_page < 0:
+			new_page = 0
+
+	return new_page
+
+# -------------------------------
+# Callback to update the attention heatmap
 # -------------------------------
 @app.callback(
 	Output("attention-heatmap", "figure"),
 	[Input("input-text", "value"),
 	 Input("combo-dropdown", "value"),
-	 Input("threshold-slider", "value")]
+	 Input("threshold-slider", "value"),
+	 Input("page-store", "data")]  # Use current page to pick which combos to show
 )
-def update_heatmap(input_text, selected_combos, threshold):
+def update_heatmap(input_text, selected_combos, threshold, current_page):
 	if not isinstance(selected_combos, list):
 		selected_combos = [selected_combos]
 	combos = []
@@ -217,21 +263,55 @@ def update_heatmap(input_text, selected_combos, threshold):
 			combos.append((int(layer_str), int(head_str)))
 		except Exception:
 			continue
-	rows = len(combos)
-	cols = 1
-	subplot_titles = [f"Layer {layer}, Head {head}" for layer, head in combos]
-	fig = make_subplots(rows=rows, cols=cols, subplot_titles=subplot_titles)
-	for i, (layer, head) in enumerate(combos):
+
+	# Show only 4 combos per page
+	page_size = 4
+	start_idx = current_page * page_size
+	end_idx = start_idx + page_size
+	combos_on_this_page = combos[start_idx:end_idx]
+
+	# We'll place them in a 2x2 grid
+	# The number of combos is up to 4, so we build subplot titles accordingly
+	subplot_titles = [f"Layer {layer}, Head {head}" for (layer, head) in combos_on_this_page]
+
+	# Always create 2 rows x 2 cols, but we might fill fewer than 4
+	fig = make_subplots(rows=2, cols=2, subplot_titles=subplot_titles)
+
+	for i, (layer, head) in enumerate(combos_on_this_page):
 		attn_data, tokens = get_attention_data(input_text, layer, head, threshold)
-		heatmap = go.Heatmap(z=attn_data, x=tokens, y=tokens,
-							 colorscale='Viridis',
-							 colorbar=dict(title="Attention Weight"))
-		fig.add_trace(heatmap, row=i+1, col=1)
+		heatmap = go.Heatmap(
+			z=attn_data,
+			x=tokens,
+			y=tokens,
+			colorscale='Viridis',
+			colorbar=dict(title="Attention Weight"),
+		)
+		row = (i // 2) + 1
+		col = (i % 2) + 1
+		fig.add_trace(heatmap, row=row, col=col)
+
+	# Force each subplot to have a square aspect ratio
+	# We'll do it by linking each y-axis to its corresponding x-axis
+	# i.e. yaxis1.scaleanchor = "x1", etc.
+	for i in range(1, 5):
+		# The first subplot uses "xaxis"/"yaxis" in the layout
+		# The second subplot uses "xaxis2"/"yaxis2", etc.
+		xaxis_key = "xaxis" if i == 1 else f"xaxis{i}"
+		yaxis_key = "yaxis" if i == 1 else f"yaxis{i}"
+
+		if xaxis_key in fig.layout and yaxis_key in fig.layout:
+			# For subplot 1, scaleanchor must be "x"
+			# For subplot 2, scaleanchor must be "x2", etc.
+			scaleanchor_val = "x" if i == 1 else f"x{i}"
+			fig.layout[yaxis_key].scaleanchor = scaleanchor_val
+			fig.layout[yaxis_key].scaleratio = 1
+
+
+	fig.update_layout(height=800, width=800)  # Adjust as you like
 	return fig
 
 # -------------------------------
-# Callback to display token details when a heatmap cell is clicked,
-# including baseline predictions and ablated predictions with extra metrics.
+# Callback to display token details on cell click
 # -------------------------------
 @app.callback(
 	Output("token-info", "children"),
@@ -248,10 +328,12 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 		token_clicked = clickData["points"][0]["x"]
 	except (KeyError, IndexError):
 		return "Error retrieving token info from click data."
+
 	token_id = tokenizer.convert_tokens_to_ids(token_clicked)
 	embedding = model.wte.weight[token_id]
 	embedding_norm = torch.norm(embedding).item()
 	info = f"Token: {token_clicked}\nToken ID: {token_id}\nEmbedding Norm: {embedding_norm:.4f}"
+
 	full_input_ids = tokenizer.encode(input_text, return_tensors='pt')
 	full_tokens = tokenizer.convert_ids_to_tokens(full_input_ids[0])
 	try:
@@ -259,16 +341,20 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 	except ValueError:
 		token_index = len(full_tokens) - 1
 	truncated_ids = full_input_ids[:, :token_index+1]
+
 	with torch.no_grad():
 		baseline_outputs = lm_model(truncated_ids)
 	baseline_logits = baseline_outputs.logits[0, -1, :]
 	baseline_probs = torch.softmax(baseline_logits, dim=-1)
+
 	baseline_topk = 5
 	baseline_top_probs, baseline_top_indices = torch.topk(baseline_probs, baseline_topk)
 	baseline_top_tokens = tokenizer.convert_ids_to_tokens(baseline_top_indices.tolist())
+
 	baseline_info = "\n\nBaseline Next Token Predictions:\n"
 	for token, prob in zip(baseline_top_tokens, baseline_top_probs.tolist()):
 		baseline_info += f"{token}: {prob:.4f}\n"
+
 	if 'ablate' in causal_intervention:
 		combo_list = combo_dropdown if isinstance(combo_dropdown, list) else [combo_dropdown]
 		hook_handles = []
@@ -283,38 +369,47 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 				make_ablate_hook(head, scale=ablation_scale)
 			)
 			hook_handles.append(hook_handle)
+
 		with torch.no_grad():
 			ablated_outputs = lm_model(truncated_ids)
+
 		for handle in hook_handles:
 			handle.remove()
+
 		ablated_logits = ablated_outputs.logits[0, -1, :]
 		ablated_probs = torch.softmax(ablated_logits, dim=-1)
 		ablated_topk = 5
 		ablated_top_probs, ablated_top_indices = torch.topk(ablated_probs, ablated_topk)
 		ablated_top_tokens = tokenizer.convert_ids_to_tokens(ablated_top_indices.tolist())
+
 		ablated_info = "\n\nAblated Next Token Predictions:\n"
 		for token, prob in zip(ablated_top_tokens, ablated_top_probs.tolist()):
 			ablated_info += f"{token}: {prob:.4f}\n"
+
 		epsilon = 1e-10
 		kl_div = torch.sum(baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))).item()
 		baseline_top_token = baseline_top_tokens[0]
 		ablated_top_token = ablated_top_tokens[0]
-		top_token_change = (f"Top token changed from '{baseline_top_token}' to '{ablated_top_token}'"
-							if baseline_top_token != ablated_top_token 
-							else "Top token remains unchanged")
-		# Calculate additional metric: change in top token probability.
+		top_token_change = (
+			f"Top token changed from '{baseline_top_token}' to '{ablated_top_token}'"
+			if baseline_top_token != ablated_top_token
+			else "Top token remains unchanged"
+		)
 		delta_top_prob = baseline_top_probs[0].item() - ablated_top_probs[0].item()
+
 		extra_metrics = "\n\nDeeper Analysis Metrics:\n"
 		extra_metrics += f"KL Divergence: {kl_div:.4f}\n"
 		extra_metrics += f"{top_token_change}\n"
 		extra_metrics += f"Delta Top Token Probability: {delta_top_prob:.4f}\n"
+
 		info += baseline_info + ablated_info + extra_metrics
 	else:
 		info += baseline_info
+
 	return html.Pre(info)
 
 # -------------------------------
-# Long callback for running the ablation study using the improved search algorithm.
+# Long callback for ablation study
 # -------------------------------
 @app.long_callback(
 	output=[Output("ablation-result", "children"),
@@ -345,22 +440,14 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	except ValueError:
 		token_index = len(full_tokens) - 1
 	truncated_ids = full_input_ids[:, :token_index+1]
-	
+
 	with torch.no_grad():
 		baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
 	baseline_probs = torch.softmax(baseline_logits, dim=-1)
-	
-	candidate_list = []
-	for layer in range(lm_model.config.n_layer):
-		for head in range(lm_model.config.n_head):
-			candidate_list.append((layer, head))
-	
-	# Use the improved ablation search algorithm with our combined score.
+
 	best_set, best_score = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=ablation_scale)
-	
-	# For now, we simply update the progress to 100% once the search is done.
 	progress(100)
-	
+
 	best_set_str = [f"{layer}-{head}" for (layer, head) in best_set]
 	table_rows = []
 	for (layer, head) in best_set:
@@ -368,21 +455,23 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 			html.Td(layer, style={'border': '1px solid black', 'padding': '4px'}),
 			html.Td(head, style={'border': '1px solid black', 'padding': '4px'})
 		]))
+
 	table = html.Table(
-		[html.Thead(html.Tr([html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
-							  html.Th("Head", style={'border': '1px solid black', 'padding': '4px'})])),
-		 html.Tbody(table_rows)],
+		[
+			html.Thead(html.Tr([
+				html.Th("Layer", style={'border': '1px solid black', 'padding': '4px'}),
+				html.Th("Head", style={'border': '1px solid black', 'padding': '4px'})
+			])),
+			html.Tbody(table_rows)
+		],
 		style={'width': '100%', 'borderCollapse': 'collapse'}
 	)
-	
+
 	result_text = f"Best ablation combo (ablating {len(best_set)} heads):"
 	result_text += f"\nCombined Score: {best_score:.4f}"
 	final_result = html.Div([html.Pre(result_text), table])
-	final_result = final_result.to_plotly_json()  # Make it JSON-serializable.
+	final_result = final_result.to_plotly_json()
 	return final_result, best_set_str
 
-# -------------------------------
-# Run the Dash app
-# -------------------------------
 if __name__ == '__main__':
 	app.run_server(debug=True)
