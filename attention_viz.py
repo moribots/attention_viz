@@ -83,12 +83,16 @@ def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, scale=0.0, e
 	combined_score = alpha * kl_div + beta * delta_top_prob
 	return combined_score
 
-def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=0.0):
+def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=0.0, progress_callback=None):
 	candidate_list = [(layer, head) for layer in range(lm_model.config.n_layer) for head in range(lm_model.config.n_head)]
 	candidate_scores = []
-	for candidate in candidate_list:
+	total_candidates = len(candidate_list)
+	# Evaluate each candidate and update progress (scaled to 0-40%)
+	for idx, candidate in enumerate(candidate_list):
 		score = evaluate_candidate(truncated_ids, baseline_probs, [candidate], scale=scale)
 		candidate_scores.append((candidate, score))
+		if progress_callback is not None:
+			progress_callback(int((idx + 1) / total_candidates * 40))
 	candidate_scores.sort(key=lambda x: x[1], reverse=True)
 	# Pre-select top 20%
 	preselected = [cand for cand, _ in candidate_scores[:max(1, len(candidate_scores)//5)]]
@@ -96,6 +100,8 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=
 	best_set = []
 	best_score = evaluate_candidate(truncated_ids, baseline_probs, best_set, scale=scale)
 	improved = True
+	iteration_count = 0
+	total_iterations = len(preselected) + 1  # heuristic for scaling progress in the while loop
 	while improved and len(best_set) < max_heads:
 		improved = False
 		best_candidate = None
@@ -112,6 +118,10 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=
 		if best_candidate is not None:
 			best_set.append(best_candidate)
 			best_score = candidate_score
+		iteration_count += 1
+		if progress_callback is not None:
+			# Update progress from 40% to 90%
+			progress_callback(40 + int(iteration_count / (total_iterations) * 50))
 	return best_set, best_score
 
 # -------------------------------
@@ -285,6 +295,7 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 			y=tokens,
 			colorscale='Viridis',
 			colorbar=dict(title="Attention Weight"),
+			hovertemplate="From Token: %{y}<br>To Token: %{x}<br>Attention: %{z:.4f}<extra></extra>"
 		)
 		row = (i // 2) + 1
 		col = (i % 2) + 1
@@ -305,7 +316,6 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 			scaleanchor_val = "x" if i == 1 else f"x{i}"
 			fig.layout[yaxis_key].scaleanchor = scaleanchor_val
 			fig.layout[yaxis_key].scaleratio = 1
-
 
 	fig.update_layout(height=800, width=800)  # Adjust as you like
 	return fig
@@ -445,7 +455,7 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 		baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
 	baseline_probs = torch.softmax(baseline_logits, dim=-1)
 
-	best_set, best_score = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=ablation_scale)
+	best_set, best_score = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=ablation_scale, progress_callback=progress)
 	progress(100)
 
 	best_set_str = [f"{layer}-{head}" for (layer, head) in best_set]
