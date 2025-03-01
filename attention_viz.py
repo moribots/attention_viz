@@ -114,6 +114,35 @@ def make_sparsification_hook(selected_head, sparsity_threshold):
 			return output_clone
 	return hook
 
+# -------------------------------
+# New Helper Function for Extra Metrics
+# -------------------------------
+def compute_extra_metrics(baseline_probs, ablated_probs, token_clicked, epsilon=1e-10):
+	"""
+	Compute additional metrics including entropy and rank change for the clicked token.
+	"""
+	kl_div = torch.sum(baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))).item()
+	delta_top_prob = baseline_probs.max().item() - ablated_probs.max().item()
+	baseline_entropy = -torch.sum(baseline_probs * torch.log(baseline_probs + epsilon)).item()
+	ablated_entropy = -torch.sum(ablated_probs * torch.log(ablated_probs + epsilon)).item()
+	entropy_diff = ablated_entropy - baseline_entropy
+	clicked_token_id = tokenizer.convert_tokens_to_ids(token_clicked)
+	baseline_sorted = torch.argsort(baseline_probs, descending=True)
+	ablated_sorted = torch.argsort(ablated_probs, descending=True)
+	baseline_rank = (baseline_sorted == clicked_token_id).nonzero(as_tuple=True)[0].item() + 1
+	ablated_rank = (ablated_sorted == clicked_token_id).nonzero(as_tuple=True)[0].item() + 1
+	rank_change = ablated_rank - baseline_rank
+	return {
+		 "KL Divergence": kl_div,
+		 "Delta Top Token Probability": delta_top_prob,
+		 "Baseline Entropy": baseline_entropy,
+		 "Ablated Entropy": ablated_entropy,
+		 "Entropy Increase": entropy_diff,
+		 "Baseline Rank": baseline_rank,
+		 "Ablated Rank": ablated_rank,
+		 "Rank Change": rank_change
+	}
+
 def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, scale=0.0, ablation_method='standard', sparsity_threshold=0.1, epsilon=1e-10):
 	hook_handles = []
 	for (layer, head) in ablation_set:
@@ -138,7 +167,7 @@ def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, scale=0.0, a
 	combined_score = alpha * kl_div + beta * delta_top_prob
 	return combined_score
 
-def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=0.0, ablation_method='standard', sparsity_threshold=0.1, progress_callback=None):
+def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=0.0, ablation_method='standard', sparsity_threshold=0.1, progress_callback=None, search_strategy='greedy'):
 	candidate_list = [(layer, head) for layer in range(lm_model.config.n_layer) for head in range(lm_model.config.n_head)]
 	candidate_scores = []
 	total_candidates = len(candidate_list)
@@ -150,10 +179,28 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=
 			progress_callback(int((idx + 1) / total_candidates * 40))
 	candidate_scores.sort(key=lambda x: x[1], reverse=True)
 	# Pre-select top 20%
-	preselected = [cand for cand, _ in candidate_scores[:max(1, len(candidate_scores)//5)]]
-
+	preselected = [cand for cand, _ in candidate_scores[:max(1, len(candidate_scores)//5)]
+	
+	]
+	# -------------------------------
+	# New iterative search over pairs (heuristic) to refine search strategy
+	# -------------------------------
 	best_set = []
 	best_score = evaluate_candidate(truncated_ids, baseline_probs, best_set, scale=scale, ablation_method=ablation_method, sparsity_threshold=sparsity_threshold)
+	if search_strategy == 'iterative' and max_heads >= 2 and len(preselected) >= 2:
+		best_pair = None
+		best_pair_score = best_score  # starting from empty set score
+		for i in range(len(preselected)):
+			for j in range(i+1, len(preselected)):
+				pair = [preselected[i], preselected[j]]
+				score = evaluate_candidate(truncated_ids, baseline_probs, pair, scale=scale, ablation_method=ablation_method, sparsity_threshold=sparsity_threshold)
+				if score > best_pair_score:
+					best_pair_score = score
+					best_pair = pair
+		if best_pair is not None:
+			best_set = best_pair
+			best_score = best_pair_score
+
 	improved = True
 	iteration_count = 0
 	total_iterations = len(preselected) + 1  # heuristic for scaling progress in the while loop
@@ -176,7 +223,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=
 		iteration_count += 1
 		if progress_callback is not None:
 			# Update progress from 40% to 90%
-			progress_callback(40 + int(iteration_count / (total_iterations) * 50))
+			progress_callback(int(iteration_count / (total_iterations) * 100))
 	return best_set, best_score
 
 # -------------------------------
@@ -452,7 +499,7 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 	 Input("causal-intervention", "value"),
 	 Input("combo-dropdown", "value"),
 	 Input("ablation-scale-slider", "value"),
-		 Input("sparsity-threshold-slider", "value")]
+	 Input("sparsity-threshold-slider", "value")]
 )
 def update_token_info(clickData, input_text, causal_intervention, combo_dropdown, ablation_scale, sparsity_threshold):
 	if clickData is None:
@@ -488,8 +535,8 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 	for token, prob in zip(baseline_top_tokens, baseline_top_probs.tolist()):
 		baseline_info += f"{token}: {prob:.4f}\n"
 
-	ablation_method = causal_intervention if not isinstance(causal_intervention, list) else (causal_intervention[0] if causal_intervention else 'none')
-	if ablation_method != 'none':
+	# Updated: use radio selection value (not checklist) for ablation method.
+	if causal_intervention != 'none':
 		combo_list = combo_dropdown if isinstance(combo_dropdown, list) else [combo_dropdown]
 		hook_handles = []
 		for combo in combo_list:
@@ -499,11 +546,11 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 				head = int(head_str)
 			except Exception:
 				continue
-			if ablation_method == 'standard':
+			if causal_intervention == 'standard':
 				hook = make_ablate_hook(head, scale=ablation_scale)
-			elif ablation_method == 'permute':
+			elif causal_intervention == 'permute':
 				hook = make_permutation_hook(head)
-			elif ablation_method == 'sparsify':
+			elif causal_intervention == 'sparsify':
 				hook = make_sparsification_hook(head, sparsity_threshold)
 			else:
 				hook = make_ablate_hook(head, scale=ablation_scale)
@@ -526,21 +573,17 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 		for token, prob in zip(ablated_top_tokens, ablated_top_probs.tolist()):
 			ablated_info += f"{token}: {prob:.4f}\n"
 
-		epsilon = 1e-10
-		kl_div = torch.sum(baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))).item()
-		baseline_top_token = baseline_top_tokens[0]
-		ablated_top_token = ablated_top_tokens[0]
-		top_token_change = (
-			f"Top token changed from '{baseline_top_token}' to '{ablated_top_token}'"
-			if baseline_top_token != ablated_top_token
-			else "Top token remains unchanged"
-		)
-		delta_top_prob = baseline_top_probs[0].item() - ablated_top_probs[0].item()
-
+		# Compute additional metrics
+		metrics = compute_extra_metrics(baseline_probs, ablated_probs, token_clicked)
 		extra_metrics = "\n\nDeeper Analysis Metrics:\n"
-		extra_metrics += f"KL Divergence: {kl_div:.4f}\n"
-		extra_metrics += f"{top_token_change}\n"
-		extra_metrics += f"Delta Top Token Probability: {delta_top_prob:.4f}\n"
+		extra_metrics += f"KL Divergence: {metrics['KL Divergence']:.4f}\n"
+		extra_metrics += f"Delta Top Token Probability: {metrics['Delta Top Token Probability']:.4f}\n"
+		extra_metrics += f"Baseline Entropy: {metrics['Baseline Entropy']:.4f}\n"
+		extra_metrics += f"Ablated Entropy: {metrics['Ablated Entropy']:.4f}\n"
+		extra_metrics += f"Entropy Increase: {metrics['Entropy Increase']:.4f}\n"
+		extra_metrics += f"Baseline Rank: {metrics['Baseline Rank']}\n"
+		extra_metrics += f"Ablated Rank: {metrics['Ablated Rank']}\n"
+		extra_metrics += f"Rank Change: {metrics['Rank Change']}\n"
 
 		info += baseline_info + ablated_info + extra_metrics
 	else:
@@ -559,8 +602,8 @@ def update_token_info(clickData, input_text, causal_intervention, combo_dropdown
 		   State("attention-heatmap", "clickData"),
 		   State("combo-dropdown", "value"),
 		   State("ablation-scale-slider", "value"),
-				   State("causal-intervention", "value"),
-				   State("sparsity-threshold-slider", "value")],
+		   State("causal-intervention", "value"),
+		   State("sparsity-threshold-slider", "value")],
 	progress=[Output("ablation-progress", "value")],
 	running=[(Output("run-ablation-study", "disabled"), True, False)],
 	manager=long_callback_manager,
@@ -587,8 +630,9 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 		baseline_logits = lm_model(truncated_ids).logits[0, -1, :]
 	baseline_probs = torch.softmax(baseline_logits, dim=-1)
 
+	# Use iterative search strategy to refine the best ablation combo.
 	ablation_method = causal_intervention if not isinstance(causal_intervention, list) else (causal_intervention[0] if causal_intervention else 'none')
-	best_set, best_score = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=ablation_scale, ablation_method=ablation_method, sparsity_threshold=sparsity_threshold, progress_callback=progress)
+	best_set, best_score = find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=ablation_scale, ablation_method=ablation_method, sparsity_threshold=sparsity_threshold, progress_callback=progress, search_strategy='iterative')
 	progress(100)
 
 	best_set_str = [f"{layer}-{head}" for (layer, head) in best_set]
@@ -612,7 +656,37 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 
 	result_text = f"Best ablation combo (ablating {len(best_set)} heads):"
 	result_text += f"\nCombined Score: {best_score:.4f}"
-	final_result = html.Div([html.Pre(result_text), table])
+
+	# Compute extra metrics for the best combo
+	hook_handles = []
+	for (layer, head) in best_set:
+		if ablation_method == 'standard':
+			hook = make_ablate_hook(head, scale=ablation_scale)
+		elif ablation_method == 'permute':
+			hook = make_permutation_hook(head)
+		elif ablation_method == 'sparsify':
+			hook = make_sparsification_hook(head, sparsity_threshold)
+		else:
+			hook = make_ablate_hook(head, scale=ablation_scale)
+		hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(hook)
+		hook_handles.append(hook_handle)
+	with torch.no_grad():
+		best_ablated_logits = lm_model(truncated_ids).logits[0, -1, :]
+	for handle in hook_handles:
+		handle.remove()
+	best_ablated_probs = torch.softmax(best_ablated_logits, dim=-1)
+	metrics = compute_extra_metrics(baseline_probs, best_ablated_probs, token_clicked)
+	extra_metrics_text = "\n\nDeeper Analysis Metrics (Best Combo):\n"
+	extra_metrics_text += f"KL Divergence: {metrics['KL Divergence']:.4f}\n"
+	extra_metrics_text += f"Delta Top Token Probability: {metrics['Delta Top Token Probability']:.4f}\n"
+	extra_metrics_text += f"Baseline Entropy: {metrics['Baseline Entropy']:.4f}\n"
+	extra_metrics_text += f"Ablated Entropy: {metrics['Ablated Entropy']:.4f}\n"
+	extra_metrics_text += f"Entropy Increase: {metrics['Entropy Increase']:.4f}\n"
+	extra_metrics_text += f"Baseline Rank: {metrics['Baseline Rank']}\n"
+	extra_metrics_text += f"Ablated Rank: {metrics['Ablated Rank']}\n"
+	extra_metrics_text += f"Rank Change: {metrics['Rank Change']}\n"
+
+	final_result = html.Div([html.Pre(result_text + extra_metrics_text), table])
 	final_result = final_result.to_plotly_json()
 	return final_result, best_set_str
 
