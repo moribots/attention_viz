@@ -1,0 +1,12 @@
+# Ignore cache directory
+cache/
+
+# Ignore virtual environment directory
+venv/
+
+# You can also include common Python ignores:
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
