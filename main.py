@@ -356,74 +356,71 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 )
 def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention, ablation_scale, sparsity_threshold):
 	"""
-	Evaluates all attention heads individually and plots their ablation scores as a bar chart.
-	
-	The function determines the token of interest (using clickData if available, or defaults to the last token),
-	computes the baseline next-token probability, then uses evaluate_all_heads to get per-head scores.
-	Finally, it visualizes the scores in a Plotly bar chart.
-	
+	Evaluates all attention heads individually for a selected token and plots their ablation scores as a bar chart.
+
+	The selected token is determined from the x-axis of the click data (assuming the heatmap now treats the x-axis as "from" tokens).
+	The ablation scores reflect the impact on the prediction for that specific token.
+
 	:param n_clicks: Number of times the "Evaluate All Heads" button was clicked.
-	:param input_text: The input text.
-	:param clickData: Data from a click in the heatmap (used to determine token index).
-	:param causal_intervention: The ablation method selected.
-	:param ablation_scale: The ablation scale factor.
-	:param sparsity_threshold: The sparsity threshold for structured sparsification.
-	:return: A Plotly figure displaying a bar chart of ablation scores for all heads.
+	:param input_text: The full input text.
+	:param clickData: Click event data from the heatmap.
+	:param causal_intervention: Selected ablation method.
+	:param ablation_scale: Ablation scale factor.
+	:param sparsity_threshold: Threshold for sparsification.
+	:return: Plotly figure displaying a bar chart of ablation scores for each head.
 	"""
-	# Determine the token index to use for ablation evaluation
+	# Determine the selected token from click data (using x-axis value)
 	if clickData is None:
-		token_index = -1  # Use last token if no click data available
+		token_clicked = None
+		token_index = -1  # Default to last token if no click is provided
 	else:
 		try:
 			token_clicked = clickData["points"][0]["x"]
 		except (KeyError, IndexError):
+			token_clicked = None
 			token_index = -1
-		else:
-			full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
-			full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
-			try:
-				token_index = full_tokens.index(token_clicked)
-			except ValueError:
-				token_index = -1  # Use last token if clicked token not found
-
+	# Encode the input text and determine token_index if possible
 	full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
-	if token_index == -1:
-		token_index = full_input_ids.shape[1] - 1
+	full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
+	if token_clicked is not None and token_clicked in full_tokens:
+		token_index = full_tokens.index(token_clicked)
+	else:
+		token_index = full_input_ids.shape[1] - 1  # Default to last token
+	
+	# Truncate input IDs up to the selected token (inclusive)
 	truncated_ids = full_input_ids[:, :token_index+1]
-
-	# Compute baseline next-token probabilities
+	
+	# Compute baseline logits for the selected token
 	with torch.no_grad():
-		baseline_logits = transformer.lm_model(truncated_ids).logits[0, -1, :]
+		baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
 	baseline_probs = torch.softmax(baseline_logits, dim=-1)
 	
-	# Use the selected ablation method; default to 'standard' if 'none' is selected
+	# Use the selected ablation method; default to 'standard' if none selected
 	method = causal_intervention if causal_intervention != 'none' else 'standard'
 	
-	# Evaluate ablation scores for each head using the helper function
+	# Evaluate ablation scores for each head for the selected token
 	head_scores = ablation.evaluate_all_heads(
 		truncated_ids, baseline_probs, transformer.lm_model,
-		scale=ablation_scale, ablation_method=method, sparsity_threshold=sparsity_threshold
+		token_index=token_index, scale=ablation_scale, ablation_method=method, sparsity_threshold=sparsity_threshold
 	)
 	
-	# Prepare data for bar chart visualization: create labels and corresponding scores
+	# Prepare labels and corresponding scores
 	labels = [f"{layer}-{head}" for (layer, head) in head_scores.keys()]
 	scores = [head_scores[(layer, head)] for (layer, head) in head_scores.keys()]
 	
 	# Create the bar chart using Plotly
-	fig = go.Figure(data=go.Bar(
-			x=[f"L{layer}-H{head}" for (layer, head) in head_scores.keys()],
-			y=[head_scores[(layer, head)] for (layer, head) in head_scores.keys()]
-		))
+	fig = go.Figure(data=go.Bar(x=labels, y=scores))
 	fig.update_layout(
+		title=f"Ablation Scores for Each Attention Head (Token: {full_tokens[token_index]})",
 		xaxis=dict(type='category'),
 		xaxis_title="Layer-Head",
-		yaxis_title="Ablation Score",
-		title="Ablation Scores for Each Attention Head"
+		yaxis_title="Ablation Score (KL Divergence + Delta Top Token Probability)",
+		xaxis_tickangle=-45,
+		template="plotly_white",
+		height=600,
+		margin=dict(l=40, r=40, t=60, b=150)
 	)
 	return fig
-
-
-
 
 @app.callback(
 	Output("token-info", "children"),
@@ -571,74 +568,58 @@ def update_token_info(clickData, input_text, causal_intervention,
 def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos,
 					   ablation_scale, causal_intervention, sparsity_threshold):
 	"""
-	Searches for the best set of heads to ablate (up to 10),
-	using an iterative strategy, then reports the results.
-
-	:param progress: function
-		Callback used to update the progress bar (0-100%).
-	:param n_clicks: int
-		Number of times the "Run Ablation Study" button was clicked.
-	:param input_text: str
-		The user-provided text to run the model on.
-	:param clickData: dict
-		Data about the clicked token in the heatmap (we need to pick a token).
-	:param current_combos: list
-		The combos selected in the dropdown (layer-head pairs).
-	:param ablation_scale: float
-		Scale factor for standard ablation.
-	:param causal_intervention: str
-		Which ablation method is chosen.
-	:param sparsity_threshold: float
-		Threshold for structured sparsification.
-	:return: tuple
-		(jsonified HTML with results, updated combos).
+	Searches for the best set of heads to ablate for maximal effect on the selected token,
+	rather than the last token. The selected token is determined by the x-axis click data.
+	
+	:param progress: Callback function to update progress.
+	:param n_clicks: Number of times the study button was clicked.
+	:param input_text: The input sentence.
+	:param clickData: Click event data from the heatmap.
+	:param current_combos: Selected layer-head combos.
+	:param ablation_scale: Scale factor for ablation.
+	:param causal_intervention: Selected ablation method.
+	:param sparsity_threshold: Threshold for sparsification.
+	:return: Tuple of updated ablation result HTML and updated combo selections.
 	"""
 	if clickData is None:
 		return "Click on a token in the heatmap before running the ablation study.", current_combos
 	
 	try:
+		# Extract token from x-axis (assuming heatmap is now set up for "from" tokens)
 		token_clicked = clickData["points"][0]["x"]
 	except (KeyError, IndexError):
 		return "Error retrieving token info from click data.", current_combos
 	
-	# Encode input and find index of the clicked token
 	full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
 	full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
 	try:
 		token_index = full_tokens.index(token_clicked)
 	except ValueError:
-		token_index = len(full_tokens) - 1
+		token_index = len(full_tokens) - 1  # Default to last token if not found
 	
 	truncated_ids = full_input_ids[:, :token_index+1]
 	
-	# Get baseline probabilities
 	with torch.no_grad():
-		baseline_logits = transformer.lm_model(truncated_ids).logits[0, -1, :]
+		baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
 	baseline_probs = torch.softmax(baseline_logits, dim=-1)
 	
-	# If the user selected 'none', let's interpret that as 'standard'
-	# so we can see some effect from the search. (Alternatively, we could skip.)
 	ablation_method = causal_intervention if causal_intervention != 'none' else 'standard'
-
+	
 	progress(10)
 	
-	# Use our ablation find_best_ablation_combo
 	best_set, best_score = ablation.find_best_ablation_combo(
-		truncated_ids, baseline_probs,
+		truncated_ids, baseline_probs, token_index=token_index,
 		max_heads=10, scale=ablation_scale,
 		ablation_method=ablation_method,
 		sparsity_threshold=sparsity_threshold,
 		lm_model=transformer.lm_model,
-		progress_callback=lambda x: progress(10 + (x * 80) // 100),  # Normalize within 10-90%,
+		progress_callback=lambda x: progress(10 + (x * 80) // 100),
 		search_strategy='iterative'
 	)
 	
-	# Mark progress as done
 	progress(100)
 	
 	best_set_str = [f"{layer}-{head}" for (layer, head) in best_set]
-	
-	# Build a small HTML table of the best set
 	table_rows = []
 	for (layer, head) in best_set:
 		table_rows.append(html.Tr([
@@ -660,7 +641,6 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	result_text = f"Best ablation combo (ablating {len(best_set)} heads):"
 	result_text += f"\nCombined Score: {best_score:.4f}"
 	
-	# For completeness, let's also compute deeper analysis metrics for that best combo
 	hook_handles = []
 	for (layer, head) in best_set:
 		if ablation_method == 'standard':
@@ -675,7 +655,7 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 		hook_handles.append(hook_handle)
 	
 	with torch.no_grad():
-		best_ablated_logits = transformer.lm_model(truncated_ids).logits[0, -1, :]
+		best_ablated_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
 	for handle in hook_handles:
 		handle.remove()
 	
@@ -695,6 +675,7 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	final_result = final_result.to_plotly_json()
 	
 	return final_result, best_set_str
+
 
 if __name__ == '__main__':
 	app.run_server(debug=True)
