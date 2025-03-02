@@ -144,7 +144,13 @@ def build_layout():
 			html.Button("Run Ablation Study", id="run-ablation-study", n_clicks=0),
 			dbc.Progress(id="ablation-progress", striped=True, animated=True,
 						 style={'marginTop': '20px', 'height': '20px'}),
-			html.Div(id="ablation-result", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'})
+			html.Div(id="ablation-result", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'}),
+
+			# Button and graph for evaluating all heads individually
+			html.Br(),
+			html.Button("Evaluate All Heads", id="evaluate-all-heads", n_clicks=0),
+			dcc.Graph(id="all-heads-bar-chart", style={"width": "100%", "minHeight": "500px"}),
+
 		]),
 		style={"width": "100%"}
 	)
@@ -337,6 +343,84 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 			fig.layout[y_str].showline = False
 
 	return fig
+
+@app.callback(
+	Output("all-heads-bar-chart", "figure"),
+	Input("evaluate-all-heads", "n_clicks"),
+	State("input-text", "value"),
+	State("attention-heatmap", "clickData"),
+	State("causal-intervention", "value"),
+	State("ablation-scale-slider", "value"),
+	State("sparsity-threshold-slider", "value")
+)
+def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention, ablation_scale, sparsity_threshold):
+	"""
+	Evaluates all attention heads individually and plots their ablation scores as a bar chart.
+	
+	The function determines the token of interest (using clickData if available, or defaults to the last token),
+	computes the baseline next-token probability, then uses evaluate_all_heads to get per-head scores.
+	Finally, it visualizes the scores in a Plotly bar chart.
+	
+	:param n_clicks: Number of times the "Evaluate All Heads" button was clicked.
+	:param input_text: The input text.
+	:param clickData: Data from a click in the heatmap (used to determine token index).
+	:param causal_intervention: The ablation method selected.
+	:param ablation_scale: The ablation scale factor.
+	:param sparsity_threshold: The sparsity threshold for structured sparsification.
+	:return: A Plotly figure displaying a bar chart of ablation scores for all heads.
+	"""
+	# Determine the token index to use for ablation evaluation
+	if clickData is None:
+		token_index = -1  # Use last token if no click data available
+	else:
+		try:
+			token_clicked = clickData["points"][0]["x"]
+		except (KeyError, IndexError):
+			token_index = -1
+		else:
+			full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
+			full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
+			try:
+				token_index = full_tokens.index(token_clicked)
+			except ValueError:
+				token_index = -1  # Use last token if clicked token not found
+
+	full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
+	if token_index == -1:
+		token_index = full_input_ids.shape[1] - 1
+	truncated_ids = full_input_ids[:, :token_index+1]
+
+	# Compute baseline next-token probabilities
+	with torch.no_grad():
+		baseline_logits = transformer.lm_model(truncated_ids).logits[0, -1, :]
+	baseline_probs = torch.softmax(baseline_logits, dim=-1)
+	
+	# Use the selected ablation method; default to 'standard' if 'none' is selected
+	method = causal_intervention if causal_intervention != 'none' else 'standard'
+	
+	# Evaluate ablation scores for each head using the helper function
+	head_scores = ablation.evaluate_all_heads(
+		truncated_ids, baseline_probs, transformer.lm_model,
+		scale=ablation_scale, ablation_method=method, sparsity_threshold=sparsity_threshold
+	)
+	
+	# Prepare data for bar chart visualization: create labels and corresponding scores
+	labels = [f"{layer}-{head}" for (layer, head) in head_scores.keys()]
+	scores = [head_scores[(layer, head)] for (layer, head) in head_scores.keys()]
+	
+	# Create the bar chart using Plotly
+	fig = go.Figure(data=go.Bar(
+			x=[f"L{layer}-H{head}" for (layer, head) in head_scores.keys()],
+			y=[head_scores[(layer, head)] for (layer, head) in head_scores.keys()]
+		))
+	fig.update_layout(
+		xaxis=dict(type='category'),
+		xaxis_title="Layer-Head",
+		yaxis_title="Ablation Score",
+		title="Ablation Scores for Each Attention Head"
+	)
+	return fig
+
 
 
 
