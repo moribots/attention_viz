@@ -71,7 +71,7 @@ def build_layout():
 			html.Div([
 				html.Label("Input Text:"),
 				dcc.Input(id="input-text", type="text",
-						  value="The quick brown fox jumps over the lazy dog.",
+						  value="Although the heavy rain persisted, the determined athletes continued their training, demonstrating remarkable perseverance.",
 						  style={'width': '100%'})
 			], style={'marginBottom': '20px'}),
 	
