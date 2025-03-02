@@ -409,15 +409,15 @@ def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention,
 	scores = [head_scores[(layer, head)] for (layer, head) in head_scores.keys()]
 	
 	# Create the bar chart using Plotly
-	fig = go.Figure(data=go.Bar(x=labels, y=scores))
+	fig = go.Figure(data=go.Bar(
+			x=[f"L{layer}-H{head}" for (layer, head) in head_scores.keys()],
+			y=[head_scores[(layer, head)] for (layer, head) in head_scores.keys()]
+		))
 	fig.update_layout(
-		title="Ablation Scores for Each Attention Head",
+		xaxis=dict(type='category'),
 		xaxis_title="Layer-Head",
-		yaxis_title="Ablation Score (KL Divergence + Delta Top Token Probability)",
-		xaxis_tickangle=-45,
-		template="plotly_white",
-		height=600,
-		margin=dict(l=40, r=40, t=60, b=150)
+		yaxis_title="Ablation Score",
+		title="Ablation Scores for Each Attention Head"
 	)
 	return fig
 
