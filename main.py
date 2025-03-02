@@ -284,12 +284,13 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 		attn_data, tokens = transformer.get_attention_data(input_text, layer, head, threshold)
 		heatmap = go.Heatmap(
 			z=attn_data,
-			x=tokens,
-			y=tokens,
+			x=tokens,  # now treating these as "from" tokens
+			y=tokens,  # these become "to" tokens
 			colorscale='Viridis',
 			colorbar=dict(title="Attention Weight"),
-			hovertemplate="From Token: %{y}<br>To Token: %{x}<br>Attention: %{z:.4f}<extra></extra>"
+			hovertemplate="From Token: %{x}<br>To Token: %{y}<br>Attention: %{z:.4f}<extra></extra>"
 		)
+
 		row = (i // cols) + 1
 		col = (i % cols) + 1
 		fig.add_trace(heatmap, row=row, col=col)
