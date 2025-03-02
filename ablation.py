@@ -232,3 +232,34 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, max_heads=10, scale=
 		if progress_callback is not None:
 			progress_callback(int(iteration_count / total_iterations * 100))
 	return best_set, best_score
+
+def evaluate_all_heads(truncated_ids, baseline_probs, lm_model, scale=0.0, ablation_method='standard', sparsity_threshold=0.1):
+	"""
+	Evaluate the impact of ablating each attention head individually.
+
+	This function iterates over all (layer, head) pairs in the model, computes the ablation
+	score using evaluate_candidate, and returns a dictionary mapping each (layer, head) tuple to its score.
+	
+	The ablation score is computed as a combination of the KL divergence between the baseline and ablated
+	probability distributions and the change in the top token probability. A higher score indicates a 
+	more critical head.
+	
+	:param truncated_ids: Input token IDs up to the token of interest.
+	:param baseline_probs: Baseline next-token probability distribution.
+	:param lm_model: The language model instance.
+	:param scale: Scale factor for standard ablation (0.0 means full ablation).
+	:param ablation_method: Method to use ('standard', 'permute', 'sparsify').
+	:param sparsity_threshold: Threshold for structured sparsification.
+	:return: Dictionary mapping (layer, head) tuples to their ablation score.
+	"""
+	head_scores = {}
+	for layer in range(lm_model.config.n_layer):
+		for head in range(lm_model.config.n_head):
+			score = evaluate_candidate(
+				truncated_ids, baseline_probs, [(layer, head)],
+				scale=scale, ablation_method=ablation_method,
+				sparsity_threshold=sparsity_threshold, lm_model=lm_model
+			)
+			head_scores[(layer, head)] = score
+	return head_scores
+
