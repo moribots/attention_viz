@@ -146,8 +146,18 @@ def build_layout():
 			# Display area for token info
 			html.Div(id="token-info", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'}),
 	
-			# Button to run the ablation study
-			html.Button("Run Ablation Study", id="run-ablation-study", n_clicks=0),
+			# Button to run the ablation study with target token dropdown
+			html.Div([
+				html.Button("Run Ablation Study", id="run-ablation-study", n_clicks=0, style={'marginRight': '10px'}),
+				html.Label("Target token:", style={'marginRight': '10px', 'marginLeft': '10px'}),
+				dcc.Dropdown(
+					id="target-token-dropdown",
+					options=[{'label': 'N/A (maximize change)', 'value': 'N/A'}],
+					value='N/A',
+					style={'width': '250px', 'display': 'inline-block'}
+				)
+			], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '20px'}),
+			
 			dbc.Progress(id="ablation-progress", striped=True, animated=True,
 						 style={'marginTop': '20px', 'height': '20px'}),
 			html.Div(id="ablation-result", style={'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'}),
@@ -440,12 +450,14 @@ def update_heatmap(input_text, selected_combos, threshold, current_page, clickDa
     State("attention-heatmap", "clickData"),
     State("causal-intervention", "value"),
     State("ablation-scale-slider", "value"),
-    State("sparsity-threshold-slider", "value")
+    State("sparsity-threshold-slider", "value"),
+    State("target-token-dropdown", "value")  # Keep this parameter for UI consistency
 )
-def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention, ablation_scale, sparsity_threshold):
+def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention, 
+                          ablation_scale, sparsity_threshold, target_token_id):
     """
-    Evaluates all attention heads individually for a selected token and plots their ablation scores as a bar chart.
-    If no token is clicked, defaults to evaluating the last token in the input.
+    Evaluates all attention heads individually for a selected token and plots their ablation scores.
+    This always evaluates based on overall distribution change regardless of target token selection.
 
     :param n_clicks: Number of times the "Evaluate All Heads" button was clicked.
     :param input_text: The full input text.
@@ -453,7 +465,8 @@ def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention,
     :param causal_intervention: Selected ablation method.
     :param ablation_scale: Ablation scale factor.
     :param sparsity_threshold: Threshold for sparsification.
-    :return: Plotly figure displaying a bar chart of ablation scores for each head.
+    :param target_token_id: ID of token (unused in this function, maintained for UI consistency).
+    :return: Plotly figure displaying a bar chart of ablation scores.
     """
     # Check if button was clicked
     if n_clicks == 0:
@@ -530,10 +543,11 @@ def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention,
     # Use the selected ablation method; default to 'standard' if none selected
     method = causal_intervention if causal_intervention != 'none' else 'standard'
     
-    # Evaluate ablation scores for each head for the selected token
+    # Evaluate all heads WITHOUT target token parameter - reverted to original behavior
     head_scores = ablation.evaluate_all_heads(
         truncated_ids, baseline_probs, transformer.lm_model,
-        token_index=token_index, scale=ablation_scale, ablation_method=method, sparsity_threshold=sparsity_threshold
+        token_index=token_index, scale=ablation_scale, 
+        ablation_method=method, sparsity_threshold=sparsity_threshold
     )
     
     # Prepare labels and corresponding scores
@@ -542,11 +556,16 @@ def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention,
     
     # Create the bar chart using Plotly
     fig = go.Figure(data=go.Bar(x=labels, y=scores))
+    
+    # Update title and y-axis - always showing distribution change metrics
+    title_text = f"Ablation Scores for Each Attention Head (Token: {token_clicked})"
+    y_axis_title = "Ablation Score (KL Divergence + Delta Top Token Probability)"
+    
     fig.update_layout(
-        title=f"Ablation Scores for Each Attention Head (Token: {token_clicked})",
+        title=title_text,
         xaxis=dict(type='category'),
         xaxis_title="Layer-Head",
-        yaxis_title="Ablation Score (KL Divergence + Delta Top Token Probability)",
+        yaxis_title=y_axis_title,
         xaxis_tickangle=-45,
         template="plotly_white",
         height=600,
@@ -691,17 +710,19 @@ def update_token_info(clickData, input_text, causal_intervention,
 		   State("combo-dropdown", "value"),
 		   State("ablation-scale-slider", "value"),
 		   State("causal-intervention", "value"),
-		   State("sparsity-threshold-slider", "value")],
+		   State("sparsity-threshold-slider", "value"),
+           State("target-token-dropdown", "value")],  # Add target token state
 	progress=[Output("ablation-progress", "value")],
 	running=[(Output("run-ablation-study", "disabled"), True, False)],
 	manager=long_callback_manager,
 	prevent_initial_call=True
 )
 def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos,
-					   ablation_scale, causal_intervention, sparsity_threshold):
+					   ablation_scale, causal_intervention, sparsity_threshold, target_token_id):
 	"""
-	Searches for the best set of heads to ablate for maximal effect on the selected token,
-	rather than the last token. The selected token is determined by the x-axis click data.
+	Searches for the best set of heads to ablate based on the selected optimization target.
+    If target_token_id is 'N/A', maximizes overall distribution change.
+    If a token is selected, finds heads that maximize that token's probability.
 	
 	:param progress: Callback function to update progress.
 	:param n_clicks: Number of times the study button was clicked.
@@ -711,6 +732,7 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	:param ablation_scale: Scale factor for ablation.
 	:param causal_intervention: Selected ablation method.
 	:param sparsity_threshold: Threshold for sparsification.
+    :param target_token_id: ID of the token to maximize probability for, or 'N/A'.
 	:return: Tuple of updated ablation result HTML and updated combo selections.
 	"""
 	if clickData is None:
@@ -739,14 +761,19 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	
 	progress(10)
 	
+	# Parse target_token_id, passing None if 'N/A' is selected
+	specific_token_id = None if target_token_id == 'N/A' else int(target_token_id)
+	
+	# Find the best ablation combo using our updated function that supports token maximization
 	best_set, best_score = ablation.find_best_ablation_combo(
 		truncated_ids, baseline_probs, token_index=token_index,
-		max_head_layer_pairs=15, scale=ablation_scale,
+		max_head_layer_pairs=20, scale=ablation_scale,
 		ablation_method=ablation_method,
 		sparsity_threshold=sparsity_threshold,
 		lm_model=transformer.lm_model,
-		progress_callback=lambda x: progress(10 + (x * 80) // 100),
-		search_strategy='iterative'
+		progress_callback=lambda x: progress(x),
+		search_strategy='iterative',
+		target_token_id=specific_token_id
 	)
 	
 	progress(100)
@@ -770,8 +797,14 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 		style={'width': '100%', 'borderCollapse': 'collapse'}
 	)
 	
-	result_text = f"Best ablation combo (ablating {len(best_set)} heads):"
-	result_text += f"\nCombined Score: {best_score:.4f}"
+	# Update result text based on what we were optimizing for
+	if specific_token_id is not None:
+		target_token = transformer.tokenizer.convert_ids_to_tokens([specific_token_id])[0]
+		result_text = f"Best ablation combo to maximize '{target_token}' probability:"
+		result_text += f"\nFinal Probability: {best_score:.4f}"
+	else:
+		result_text = f"Best ablation combo (ablating {len(best_set)} heads):"
+		result_text += f"\nCombined Score: {best_score:.4f}"
 	
 	hook_handles = []
 	for (layer, head) in best_set:
@@ -792,22 +825,83 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 		handle.remove()
 	
 	best_ablated_probs = torch.softmax(best_ablated_logits, dim=-1)
-	extra = metrics.compute_extra_metrics(baseline_probs, best_ablated_probs, token_clicked, transformer.tokenizer)
-	extra_metrics_text = "\n\nDeeper Analysis Metrics (Best Combo):\n"
-	extra_metrics_text += f"KL Divergence: {extra['KL Divergence']:.4f}\n"
-	extra_metrics_text += f"Delta Top Token Probability: {extra['Delta Top Token Probability']:.4f}\n"
-	extra_metrics_text += f"Baseline Entropy: {extra['Baseline Entropy']:.4f}\n"
-	extra_metrics_text += f"Ablated Entropy: {extra['Ablated Entropy']:.4f}\n"
-	extra_metrics_text += f"Entropy Increase: {extra['Entropy Increase']:.4f}\n"
-	extra_metrics_text += f"Baseline Rank: {extra['Baseline Rank']}\n"
-	extra_metrics_text += f"Ablated Rank: {extra['Ablated Rank']:.4f}\n"
-	extra_metrics_text += f"Rank Change: {extra['Rank Change']}\n"
+	
+	# If we're targeting a specific token, show its probability before and after
+	if specific_token_id is not None:
+		target_token = transformer.tokenizer.convert_ids_to_tokens([specific_token_id])[0]
+		baseline_target_prob = baseline_probs[specific_token_id].item()
+		ablated_target_prob = best_ablated_probs[specific_token_id].item()
+		extra_metrics_text = f"\n\nTarget Token: {target_token}"
+		extra_metrics_text += f"\nBaseline Probability: {baseline_target_prob:.4f}"
+		extra_metrics_text += f"\nAblated Probability: {ablated_target_prob:.4f}"
+		extra_metrics_text += f"\nProbability Increase: {ablated_target_prob - baseline_target_prob:.4f}"
+	else:
+		# Original metrics
+		extra = metrics.compute_extra_metrics(baseline_probs, best_ablated_probs, token_clicked, transformer.tokenizer)
+		extra_metrics_text = "\n\nDeeper Analysis Metrics (Best Combo):\n"
+		extra_metrics_text += f"KL Divergence: {extra['KL Divergence']:.4f}\n"
+		extra_metrics_text += f"Delta Top Token Probability: {extra['Delta Top Token Probability']:.4f}\n"
+		extra_metrics_text += f"Baseline Entropy: {extra['Baseline Entropy']:.4f}\n"
+		extra_metrics_text += f"Ablated Entropy: {extra['Ablated Entropy']:.4f}\n"
+		extra_metrics_text += f"Entropy Increase: {extra['Entropy Increase']:.4f}\n"
+		extra_metrics_text += f"Baseline Rank: {extra['Baseline Rank']}\n"
+		extra_metrics_text += f"Ablated Rank: {extra['Ablated Rank']}\n"
+		extra_metrics_text += f"Rank Change: {extra['Rank Change']}\n"
 	
 	final_result = html.Div([html.Pre(result_text + extra_metrics_text), table])
 	final_result = final_result.to_plotly_json()
 	
 	return final_result, best_set_str
 
+@app.callback(
+    Output("target-token-dropdown", "options"),
+    [Input("attention-heatmap", "clickData"),
+     Input("input-text", "value")]
+)
+def update_target_dropdown(clickData, input_text):
+    """
+    Updates the target token dropdown with the top 5 predicted next tokens when a token is clicked.
+    
+    :param clickData: Click event data from the heatmap.
+    :param input_text: The user-provided text.
+    :return: Updated dropdown options with N/A and top 5 predicted tokens.
+    """
+    if clickData is None:
+        return [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
+    
+    try:
+        token_clicked = clickData["points"][0]["x"]
+    except (KeyError, IndexError):
+        return [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
+    
+    # Encode the input text
+    full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
+    full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
+    
+    # Find token index, defaulting to last token if not found
+    try:
+        token_index = full_tokens.index(token_clicked)
+    except ValueError:
+        token_index = len(full_tokens) - 1
+    
+    truncated_ids = full_input_ids[:, :token_index+1]
+    
+    # Get baseline predictions for the token
+    with torch.no_grad():
+        baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
+    baseline_probs = torch.softmax(baseline_logits, dim=-1)
+    
+    # Get top 5 tokens
+    baseline_topk = 5
+    baseline_top_probs, baseline_top_indices = torch.topk(baseline_probs, baseline_topk)
+    baseline_top_tokens = transformer.tokenizer.convert_ids_to_tokens(baseline_top_indices.tolist())
+    
+    # Create dropdown options with N/A and top 5 tokens
+    options = [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
+    for token, prob, token_id in zip(baseline_top_tokens, baseline_top_probs.tolist(), baseline_top_indices.tolist()):
+        options.append({'label': f"{token} ({prob:.4f})", 'value': str(token_id)})
+    
+    return options
 
 if __name__ == '__main__':
 	app.run_server(debug=True)
