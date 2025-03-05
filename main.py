@@ -215,11 +215,13 @@ def update_page(prev_clicks, next_clicks, combos, current_page):
 	[Input("input-text", "value"),
 	 Input("combo-dropdown", "value"),
 	 Input("threshold-slider", "value"),
-	 Input("page-store", "data")]
+	 Input("page-store", "data"),
+	 Input("attention-heatmap", "clickData")]  # Add clickData as input
 )
-def update_heatmap(input_text, selected_combos, threshold, current_page):
+def update_heatmap(input_text, selected_combos, threshold, current_page, clickData):
 	"""
 	Renders the attention heatmap for up to NUM_COMBOS combos on the current "page".
+	Highlights the selected token and its attention patterns with red rectangular borders.
 
 	:param input_text: str
 		The user-provided text.
@@ -229,8 +231,10 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 		Minimum attention value for display.
 	:param current_page: int
 		The current page index (for combos).
+	:param clickData: dict
+		Click data containing information about the selected token.
 	:return: plotly.graph_objects.Figure
-		The figure containing one or more heatmaps.
+		The figure containing one or more heatmaps with highlight rectangles.
 	"""
 	if not isinstance(selected_combos, list):
 		selected_combos = [selected_combos]
@@ -278,6 +282,14 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 		row_heights=[1.0 / rows] * rows, # The number of columns always increases before the number of rows, and the max is 2.
 		column_widths=[1.0 / cols] * cols
 	)
+	
+	# Extract selected token from clickData (if available)
+	selected_token = None
+	if clickData is not None:
+		try:
+			selected_token = clickData["points"][0]["x"]
+		except (KeyError, IndexError):
+			selected_token = None
 
 	# Add a heatmap for each (layer, head)
 	for i, (layer, head) in enumerate(combos_on_page):
@@ -294,10 +306,37 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 		row = (i // cols) + 1
 		col = (i % cols) + 1
 		fig.add_trace(heatmap, row=row, col=col)
+		
+		# Add highlighting for selected token if available
+		if selected_token is not None and selected_token in tokens:
+			token_idx = tokens.index(selected_token)
+			
+			# Add shape to highlight row (tokens this token attends to)
+			fig.add_shape(
+				type="rect",
+				x0=-0.5,  # Start slightly before first token
+				x1=len(tokens) - 0.5,  # End slightly after last token
+				y0=token_idx - 0.5,  # Selected token's row
+				y1=token_idx + 0.5,
+				line=dict(color="red", width=3),
+				fillcolor="rgba(0,0,0,0)",  # Transparent fill
+				row=row,
+				col=col
+			)
+			
+			# Add shape to highlight column (tokens that attend to this token)
+			fig.add_shape(
+				type="rect",
+				x0=token_idx - 0.5,  # Selected token's column
+				x1=token_idx + 0.5,
+				y0=-0.5,  # Start slightly before first token
+				y1=len(tokens) - 0.5,  # End slightly after last token
+				line=dict(color="red", width=3),
+				fillcolor="rgba(0,0,0,0)",  # Transparent fill
+				row=row,
+				col=col
+			)
 	
-	# Suppose rows and cols are determined by how many combos you have (max 2×2).
-	# After you create your subplots and add your heatmaps:
-
 	# 1) Force each subplot to remain square via scaleanchor/scaleratio
 	for i in range(1, rows * cols + 1):
 		x_str = "x" if i == 1 else f"x{i}"
@@ -307,20 +346,11 @@ def update_heatmap(input_text, selected_combos, threshold, current_page):
 			fig.layout[y_str].scaleanchor = x_str
 			fig.layout[y_str].scaleratio = 1
 
-	# 2) Dynamically size the figure based on rows and cols.
-	#    We'll define a base "subplot_size" that sets how big each square is.
-	#    Then figure width = subplot_size * cols + some margin
-	#    and figure height = subplot_size * rows + some margin.
-
+	# 2) Dynamically size the figure based on rows and cols
 	subplot_size = 650  # Adjust this to make subplots bigger or smaller
 
 	fig_width = subplot_size * cols
 	fig_height = subplot_size * rows * 2.0 / 3.0
-
-	# If you only have 1 row and 2 columns, for instance, 
-	#   fig_width = 300 * 2 + 100 = 700
-	#   fig_height = 300 * 1 + 100 = 400
-	# That yields a fairly wide but not super tall figure.
 
 	fig.update_layout(
 		autosize=False,
@@ -668,7 +698,7 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	extra_metrics_text += f"Ablated Entropy: {extra['Ablated Entropy']:.4f}\n"
 	extra_metrics_text += f"Entropy Increase: {extra['Entropy Increase']:.4f}\n"
 	extra_metrics_text += f"Baseline Rank: {extra['Baseline Rank']}\n"
-	extra_metrics_text += f"Ablated Rank: {extra['Ablated Rank']}\n"
+	extra_metrics_text += f"Ablated Rank: {extra['Ablated Rank']:.4f}\n"
 	extra_metrics_text += f"Rank Change: {extra['Rank Change']}\n"
 	
 	final_result = html.Div([html.Pre(result_text + extra_metrics_text), table])
