@@ -609,7 +609,7 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	
 	best_set, best_score = ablation.find_best_ablation_combo(
 		truncated_ids, baseline_probs, token_index=token_index,
-		max_heads=10, scale=ablation_scale,
+		max_head_layer_pairs=15, scale=ablation_scale,
 		ablation_method=ablation_method,
 		sparsity_threshold=sparsity_threshold,
 		lm_model=transformer.lm_model,

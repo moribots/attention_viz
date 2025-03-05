@@ -149,7 +149,7 @@ def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, token_index=
 	return combined_score
 
 
-def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_heads=10, scale=0.0, ablation_method='standard',
+def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_head_layer_pairs=10, scale=0.0, ablation_method='standard',
 							  sparsity_threshold=0.1, lm_model=None, progress_callback=None, search_strategy='greedy'):
 	"""
 	Find the best combination of attention heads to ablate for maximal effect on the token at token_index.
@@ -161,7 +161,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 	:param truncated_ids: Torch tensor of input token IDs up to the token of interest.
 	:param baseline_probs: Baseline probability distribution for the token at token_index.
 	:param token_index: The index of the token to evaluate.
-	:param max_heads: Maximum number of heads to ablate.
+	:param max_head_layer_pairs: Maximum number of heads to ablate.
 	:param scale: Ablation scale factor.
 	:param ablation_method: Ablation method ('standard', 'permute', or 'sparsify').
 	:param sparsity_threshold: Threshold for sparsification.
@@ -194,7 +194,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 									token_index=token_index, scale=scale, ablation_method=ablation_method,
 									sparsity_threshold=sparsity_threshold, lm_model=lm_model)
 	# Optional pair search if enabled.
-	if search_strategy == 'iterative' and max_heads >= 2 and len(preselected) >= 2:
+	if search_strategy == 'iterative' and max_head_layer_pairs >= 2 and len(preselected) >= 2:
 		best_pair = None
 		best_pair_score = best_score  # start with the empty set score
 		for i in range(len(preselected)):
@@ -214,7 +214,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 	improved = True
 	iteration_count = 0
 	total_iterations = len(preselected) + 1
-	while improved and len(best_set) < max_heads:
+	while improved and len(best_set) < max_head_layer_pairs:
 		improved = False
 		best_candidate = None
 		candidate_score = best_score
