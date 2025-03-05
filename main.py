@@ -71,7 +71,7 @@ def build_layout():
 			html.Div([
 				html.Label("Input Text:"),
 				dcc.Input(id="input-text", type="text",
-						  value="Despite the criticism, the author defended his controversial novel.",
+						  value="After months of meticulous research and careful experimentation, the scientist discovered a remarkable",
 						  style={'width': '100%'})
 			], style={'marginBottom': '20px'}),
 	
@@ -413,81 +413,122 @@ def update_heatmap(input_text, selected_combos, threshold, current_page, clickDa
 	return fig
 
 @app.callback(
-	Output("all-heads-bar-chart", "figure"),
-	Input("evaluate-all-heads", "n_clicks"),
-	State("input-text", "value"),
-	State("attention-heatmap", "clickData"),
-	State("causal-intervention", "value"),
-	State("ablation-scale-slider", "value"),
-	State("sparsity-threshold-slider", "value")
+    Output("all-heads-bar-chart", "figure"),
+    Input("evaluate-all-heads", "n_clicks"),
+    State("input-text", "value"),
+    State("attention-heatmap", "clickData"),
+    State("causal-intervention", "value"),
+    State("ablation-scale-slider", "value"),
+    State("sparsity-threshold-slider", "value")
 )
 def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention, ablation_scale, sparsity_threshold):
-	"""
-	Evaluates all attention heads individually for a selected token and plots their ablation scores as a bar chart.
+    """
+    Evaluates all attention heads individually for a selected token and plots their ablation scores as a bar chart.
 
-	The selected token is determined from the x-axis of the click data (assuming the heatmap now treats the x-axis as "from" tokens).
-	The ablation scores reflect the impact on the prediction for that specific token.
+    The selected token is determined from the x-axis of the click data (assuming the heatmap now treats the x-axis as "from" tokens).
+    The ablation scores reflect the impact on the prediction for that specific token.
 
-	:param n_clicks: Number of times the "Evaluate All Heads" button was clicked.
-	:param input_text: The full input text.
-	:param clickData: Click event data from the heatmap.
-	:param causal_intervention: Selected ablation method.
-	:param ablation_scale: Ablation scale factor.
-	:param sparsity_threshold: Threshold for sparsification.
-	:return: Plotly figure displaying a bar chart of ablation scores for each head.
-	"""
-	# Determine the selected token from click data (using x-axis value)
-	if clickData is None:
-		token_clicked = None
-		token_index = -1  # Default to last token if no click is provided
-	else:
-		try:
-			token_clicked = clickData["points"][0]["x"]
-		except (KeyError, IndexError):
-			token_clicked = None
-			token_index = -1
-	# Encode the input text and determine token_index if possible
-	full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
-	full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
-	if token_clicked is not None and token_clicked in full_tokens:
-		token_index = full_tokens.index(token_clicked)
-	else:
-		token_index = full_input_ids.shape[1] - 1  # Default to last token
-	
-	# Truncate input IDs up to the selected token (inclusive)
-	truncated_ids = full_input_ids[:, :token_index+1]
-	
-	# Compute baseline logits for the selected token
-	with torch.no_grad():
-		baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
-	baseline_probs = torch.softmax(baseline_logits, dim=-1)
-	
-	# Use the selected ablation method; default to 'standard' if none selected
-	method = causal_intervention if causal_intervention != 'none' else 'standard'
-	
-	# Evaluate ablation scores for each head for the selected token
-	head_scores = ablation.evaluate_all_heads(
-		truncated_ids, baseline_probs, transformer.lm_model,
-		token_index=token_index, scale=ablation_scale, ablation_method=method, sparsity_threshold=sparsity_threshold
-	)
-	
-	# Prepare labels and corresponding scores
-	labels = [f"{layer}-{head}" for (layer, head) in head_scores.keys()]
-	scores = [head_scores[(layer, head)] for (layer, head) in head_scores.keys()]
-	
-	# Create the bar chart using Plotly
-	fig = go.Figure(data=go.Bar(x=labels, y=scores))
-	fig.update_layout(
-		title=f"Ablation Scores for Each Attention Head (Token: {full_tokens[token_index]})",
-		xaxis=dict(type='category'),
-		xaxis_title="Layer-Head",
-		yaxis_title="Ablation Score (KL Divergence + Delta Top Token Probability)",
-		xaxis_tickangle=-45,
-		template="plotly_white",
-		height=600,
-		margin=dict(l=40, r=40, t=60, b=150)
-	)
-	return fig
+    :param n_clicks: Number of times the "Evaluate All Heads" button was clicked.
+    :param input_text: The full input text.
+    :param clickData: Click event data from the heatmap.
+    :param causal_intervention: Selected ablation method.
+    :param ablation_scale: Ablation scale factor.
+    :param sparsity_threshold: Threshold for sparsification.
+    :return: Plotly figure displaying a bar chart of ablation scores for each head.
+    """
+    # Check if button was clicked
+    if n_clicks == 0:
+        # Return empty figure if button hasn't been clicked yet
+        return go.Figure()
+        
+    # Encode the input text to get tokens
+    full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
+    full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
+    
+    # Determine the selected token from click data
+    token_clicked = None
+    if clickData is not None:
+        try:
+            token_clicked = clickData["points"][0]["x"]
+            print(f"Token clicked: {token_clicked}")
+        except (KeyError, IndexError) as e:
+            print(f"Error extracting clicked token: {e}")
+    
+    # Find the index of the clicked token in the input
+    token_index = -1  # Default to last token
+    if token_clicked is not None:
+        # We need to handle the display formatting that might be present in token names
+        # Extract base token without positional suffix if present
+        clean_token = token_clicked.split('_')[0] if '_' in token_clicked else token_clicked
+        
+        # Find matching tokens in the full token list
+        matches = []
+        for i, token in enumerate(full_tokens):
+            # Clean the token for comparison
+            if token.startswith('Ġ'):  # Handle GPT-2's space prefix
+                clean_full_token = token[1:]
+            else:
+                clean_full_token = token
+                
+            if clean_full_token == clean_token:
+                matches.append(i)
+        
+        # Use the match if found
+        if matches:
+            # If there are multiple matches, try to determine which one was clicked
+            # based on position suffix or default to the first occurrence
+            if '_' in token_clicked and len(matches) > 1:
+                try:
+                    position = int(token_clicked.split('_')[1])
+                    if 1 <= position <= len(matches):
+                        token_index = matches[position - 1]
+                    else:
+                        token_index = matches[0]
+                except (ValueError, IndexError):
+                    token_index = matches[0]
+            else:
+                token_index = matches[0]
+        
+        print(f"Selected token: {token_clicked}, Index: {token_index}, Full token: {full_tokens[token_index] if token_index >= 0 else 'N/A'}")
+    else:
+        # If no token was clicked, default to the last token
+        token_index = len(full_tokens) - 1
+        print(f"No token clicked, defaulting to last token: {full_tokens[token_index]}")
+    
+    # Truncate input IDs up to the selected token (inclusive)
+    truncated_ids = full_input_ids[:, :token_index+1]
+    
+    # Compute baseline logits for the selected token
+    with torch.no_grad():
+        baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
+    baseline_probs = torch.softmax(baseline_logits, dim=-1)
+    
+    # Use the selected ablation method; default to 'standard' if none selected
+    method = causal_intervention if causal_intervention != 'none' else 'standard'
+    
+    # Evaluate ablation scores for each head for the selected token
+    head_scores = ablation.evaluate_all_heads(
+        truncated_ids, baseline_probs, transformer.lm_model,
+        token_index=token_index, scale=ablation_scale, ablation_method=method, sparsity_threshold=sparsity_threshold
+    )
+    
+    # Prepare labels and corresponding scores
+    labels = [f"{layer}-{head}" for (layer, head) in sorted(head_scores.keys())]
+    scores = [head_scores[(layer, head)] for (layer, head) in sorted(head_scores.keys())]
+    
+    # Create the bar chart using Plotly
+    fig = go.Figure(data=go.Bar(x=labels, y=scores))
+    fig.update_layout(
+        title=f"Ablation Scores for Each Attention Head (Token: {full_tokens[token_index]})",
+        xaxis=dict(type='category'),
+        xaxis_title="Layer-Head",
+        yaxis_title="Ablation Score (KL Divergence + Delta Top Token Probability)",
+        xaxis_tickangle=-45,
+        template="plotly_white",
+        height=600,
+        margin=dict(l=40, r=40, t=60, b=150)
+    )
+    return fig
 
 @app.callback(
 	Output("token-info", "children"),
@@ -746,3 +787,27 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 
 if __name__ == '__main__':
 	app.run_server(debug=True)
+
+	"""
+
+	1. Standard Ablation
+	What it does: Zeroes out or scales down the output of specific attention heads (controlled by the ablation scale slider).
+
+	Works best when: You want to understand the basic importance of a head by completely removing its contribution.
+
+	Why it's useful: Provides a straightforward measure of head importance - if removing a head drastically changes predictions, it's likely critical.
+
+	2. Permutation Ablation
+	What it does: Maintains the same attention weights but randomly shuffles which tokens they connect to.
+
+	Works best when: The specific pattern or ordering of attention matters.
+
+	Why it's useful: If a head's function depends on attending to particular tokens in a specific order (like attending to a subject to determine a verb's form), permutation will disrupt this while keeping the overall "energy" intact. Heads that show larger effects under permutation than standard ablation likely perform precise targeting rather than general information aggregation.
+
+	3. Structured Sparsification
+	What it does: Retains only the strongest attention connections above the sparsity threshold, zeroing out weaker ones.
+
+	Works best when: Testing if partial information is sufficient for a head's function.
+
+	Why it's useful: If a head works well with only its top connections, weaker ones may be redundant. Heads resilient to sparsification likely rely on just a few key connections rather than broad patterns. This method helps identify heads that perform specialized, focused tasks versus those that need complete information.
+	"""
