@@ -71,7 +71,7 @@ def build_layout():
 			html.Div([
 				html.Label("Input Text:"),
 				dcc.Input(id="input-text", type="text",
-						  value="Although the heavy rain persisted, the determined athletes continued their training, demonstrating remarkable perseverance.",
+						  value="Despite the criticism, he defended his controversial novel.",
 						  style={'width': '100%'})
 			], style={'marginBottom': '20px'}),
 	
