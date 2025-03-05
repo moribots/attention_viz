@@ -75,14 +75,20 @@ def build_layout():
 						  style={'width': '100%'})
 			], style={'marginBottom': '20px'}),
 	
-			# Dropdown for selecting combos
+			# Dropdown for selecting combos with reset button
 			html.Div([
-				html.Label("Select Layer–Head Combos:"),
-				dcc.Dropdown(id="combo-dropdown",
-							 options=layer_and_head_options,
-							 value=["0-0"],
-							 multi=True, clearable=False)
-			], style={'width': '90%', 'marginBottom': '20px'}),
+				html.Div([
+					html.Label("Select Layer–Head Combos:"),
+					dcc.Dropdown(id="combo-dropdown",
+								options=layer_and_head_options,
+								value=["0-0"],
+								multi=True, clearable=False)
+				], style={'width': '80%', 'display': 'inline-block'}),
+				html.Div([
+					html.Button("Reset", id="reset-button", className="btn btn-outline-secondary",
+							   style={'marginLeft': '10px', 'marginTop': '25px'})
+				], style={'width': '20%', 'display': 'inline-block', 'verticalAlign': 'top'})
+			], style={'display': 'flex', 'marginBottom': '20px'}),
 	
 			# Threshold slider
 			html.Div([
@@ -166,6 +172,21 @@ def build_layout():
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP],
 				long_callback_manager=long_callback_manager)
 app.layout = build_layout()
+
+# Add a new callback for the reset button
+@app.callback(
+    Output("combo-dropdown", "value", allow_duplicate=True),
+    Input("reset-button", "n_clicks"),
+    prevent_initial_call=True
+)
+def reset_combos(n_clicks):
+    """
+    Resets the layer-head combo selection to just show Layer 0, Head 0.
+    
+    :param n_clicks: Number of times the reset button has been clicked.
+    :return: Default list with just "0-0" selected.
+    """
+    return ["0-0"]
 
 @app.callback(
 	Output("page-store", "data"),
@@ -424,9 +445,7 @@ def update_heatmap(input_text, selected_combos, threshold, current_page, clickDa
 def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention, ablation_scale, sparsity_threshold):
     """
     Evaluates all attention heads individually for a selected token and plots their ablation scores as a bar chart.
-
-    The selected token is determined from the x-axis of the click data (assuming the heatmap now treats the x-axis as "from" tokens).
-    The ablation scores reflect the impact on the prediction for that specific token.
+    If no token is clicked, defaults to evaluating the last token in the input.
 
     :param n_clicks: Number of times the "Evaluate All Heads" button was clicked.
     :param input_text: The full input text.
@@ -445,7 +464,7 @@ def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention,
     full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
     full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
     
-    # Determine the selected token from click data
+    # Default to last token if no token is clicked
     token_clicked = None
     if clickData is not None:
         try:
@@ -453,10 +472,14 @@ def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention,
             print(f"Token clicked: {token_clicked}")
         except (KeyError, IndexError) as e:
             print(f"Error extracting clicked token: {e}")
+            print("Defaulting to last token in the sequence")
     
-    # Find the index of the clicked token in the input
-    token_index = -1  # Default to last token
-    if token_clicked is not None:
+    if token_clicked is None:
+        # If no token was clicked, explicitly set to evaluate the last token
+        token_index = len(full_tokens) - 1
+        token_clicked = full_tokens[token_index]
+        print(f"No token selected, defaulting to last token: {token_clicked}")
+    else:
         # We need to handle the display formatting that might be present in token names
         # Extract base token without positional suffix if present
         clean_token = token_clicked.split('_')[0] if '_' in token_clicked else token_clicked
@@ -488,12 +511,13 @@ def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention,
                     token_index = matches[0]
             else:
                 token_index = matches[0]
+        else:
+            # If no match found, default to the last token
+            token_index = len(full_tokens) - 1
+            token_clicked = full_tokens[token_index]
+            print(f"Could not find token match, defaulting to last token: {token_clicked}")
         
         print(f"Selected token: {token_clicked}, Index: {token_index}, Full token: {full_tokens[token_index] if token_index >= 0 else 'N/A'}")
-    else:
-        # If no token was clicked, default to the last token
-        token_index = len(full_tokens) - 1
-        print(f"No token clicked, defaulting to last token: {full_tokens[token_index]}")
     
     # Truncate input IDs up to the selected token (inclusive)
     truncated_ids = full_input_ids[:, :token_index+1]
@@ -519,7 +543,7 @@ def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention,
     # Create the bar chart using Plotly
     fig = go.Figure(data=go.Bar(x=labels, y=scores))
     fig.update_layout(
-        title=f"Ablation Scores for Each Attention Head (Token: {full_tokens[token_index]})",
+        title=f"Ablation Scores for Each Attention Head (Token: {token_clicked})",
         xaxis=dict(type='category'),
         xaxis_title="Layer-Head",
         yaxis_title="Ablation Score (KL Divergence + Delta Top Token Probability)",
