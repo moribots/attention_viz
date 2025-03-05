@@ -71,7 +71,7 @@ def build_layout():
 			html.Div([
 				html.Label("Input Text:"),
 				dcc.Input(id="input-text", type="text",
-						  value="Despite the criticism, he defended his controversial novel.",
+						  value="Despite the criticism, the author defended his controversial novel.",
 						  style={'width': '100%'})
 			], style={'marginBottom': '20px'}),
 	
@@ -294,10 +294,13 @@ def update_heatmap(input_text, selected_combos, threshold, current_page, clickDa
 	# Add a heatmap for each (layer, head)
 	for i, (layer, head) in enumerate(combos_on_page):
 		attn_data, tokens = transformer.get_attention_data(input_text, layer, head, threshold)
+		print(f'tokens: {tokens}')
+		
+		# Create heatmap with explicit axis settings
 		heatmap = go.Heatmap(
 			z=attn_data,
-			x=tokens,  # now treating these as "from" tokens
-			y=tokens,  # these become "to" tokens
+			x=tokens,  # from tokens
+			y=tokens,  # to tokens
 			colorscale='Viridis',
 			colorbar=dict(title="Attention Weight"),
 			hovertemplate="From Token: %{x}<br>To Token: %{y}<br>Attention: %{z:.4f}<extra></extra>"
@@ -372,6 +375,40 @@ def update_heatmap(input_text, selected_combos, threshold, current_page, clickDa
 			fig.layout[y_str].showgrid = False
 			fig.layout[y_str].zeroline = False
 			fig.layout[y_str].showline = False
+
+	# Set explicit axis configurations to ensure all tokens are visible
+	for i in range(1, rows * cols + 1):
+		x_str = "x" if i == 1 else f"x{i}"
+		y_str = "y" if i == 1 else f"y{i}"
+		if x_str in fig.layout and y_str in fig.layout:
+			# Make sure axes show all ticks and don't skip any tokens
+			fig.layout[x_str].update(
+				showgrid=False,
+				zeroline=False,
+				showline=False,
+				tickmode='array',
+				tickvals=list(range(len(tokens))),
+				ticktext=tokens,
+				tickangle=45
+			)
+			fig.layout[y_str].update(
+				showgrid=False,
+				zeroline=False,
+				showline=False,
+				tickmode='array',
+				tickvals=list(range(len(tokens))),
+				ticktext=tokens
+				)
+
+	# Increase margins to ensure all labels are visible
+	fig.update_layout(
+		autosize=False,
+		width=fig_width,
+		height=fig_height,
+		margin=dict(l=80, r=40, t=50, b=80),  # Increased bottom and left margins
+		paper_bgcolor="white",
+		plot_bgcolor="white"
+	)
 
 	return fig
 

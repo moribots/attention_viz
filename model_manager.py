@@ -38,8 +38,28 @@ class TransformerModel:
 		"""
 		# Convert the input text into a tensor of token IDs
 		input_ids = self.tokenizer.encode(input_text, return_tensors='pt')
-		# Convert those IDs back into tokens (for labeling in the heatmap)
+		
+		# Get the raw tokens and clean them for display
 		tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0])
+		
+		# Create display tokens that preserve uniqueness by adding position indicators
+		# This ensures that repeated tokens like "the" are displayed uniquely
+		display_tokens = []
+		token_counts = {}  # To track number of occurrences of each token
+		
+		for i, token in enumerate(tokens):
+			# Clean up the tokenizer's special prefixes for display
+			if token.startswith('Ġ'):  # This is GPT-2's prefix for tokens that start with a space
+				display_token = token[1:]  # Remove the 'Ġ' prefix
+			else:
+				display_token = token
+				
+			# Add position information for duplicate tokens to ensure uniqueness in visualization
+			token_counts[display_token] = token_counts.get(display_token, 0) + 1
+			if token_counts[display_token] > 1:
+				display_token = f"{display_token}_{token_counts[display_token]}"
+			
+			display_tokens.append(display_token)
 		
 		# Run the model without gradient calculations
 		with torch.no_grad():
@@ -54,4 +74,27 @@ class TransformerModel:
 		# Zero out any values below the threshold
 		filtered_attn_data = attn_data * (attn_data >= threshold)
 		
-		return filtered_attn_data, tokens
+		# Add debug info to help users understand the tokenization
+		print(f"Input text: {input_text}")
+		print(f"Raw tokens: {tokens}")
+		print(f"Display tokens: {display_tokens}")
+		
+		return filtered_attn_data, display_tokens
+		
+	def get_token_mapping(self, input_text):
+		"""
+		Returns the mapping between input text and tokenized output.
+		Useful for debugging tokenization issues.
+		
+		:param input_text: The input text string.
+		:return: A list of (token, original_text_span) tuples.
+		"""
+		# Tokenize the input text
+		tokens = self.tokenizer.tokenize(input_text)
+		
+		# Print the tokens to help debug
+		print(f"Input: {input_text}")
+		print(f"Tokenized: {tokens}")
+		
+		# Return the tokens for inspection
+		return tokens
