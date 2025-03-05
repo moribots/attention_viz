@@ -71,7 +71,7 @@ def build_layout():
 			html.Div([
 				html.Label("Input Text:"),
 				dcc.Input(id="input-text", type="text",
-						  value="After months of meticulous research and careful experimentation, the scientist discovered a remarkable",
+						  value="The key to the cabinets",
 						  style={'width': '100%'})
 			], style={'marginBottom': '20px'}),
 	
