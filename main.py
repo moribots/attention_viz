@@ -24,6 +24,10 @@ import torch
 from model_manager import TransformerModel
 import ablation
 import metrics
+from circuit_finder import CircuitFinder
+import io
+import base64
+from PIL import Image
 
 # Set up caching for long callbacks
 cache = diskcache.Cache("./cache")
@@ -167,6 +171,23 @@ def build_layout():
 			html.Button("Evaluate All Heads", id="evaluate-all-heads", n_clicks=0),
 			dcc.Graph(id="all-heads-bar-chart", style={"width": "100%", "minHeight": "500px"}),
 
+			# Add button for circuit discovery after the ablation results section
+			html.Div([
+				html.Button("Discover Circuit", id="discover-circuit-btn", 
+						   n_clicks=0, className="btn btn-primary",
+						   style={'marginRight': '10px'}),
+				dbc.Progress(id="circuit-progress", striped=True, animated=True,
+							style={'marginTop': '10px', 'height': '20px', 'width': '90%'}),
+			], style={'marginTop': '20px'}),
+			
+			# Add container for circuit visualization
+			html.Div(id="circuit-container", style={
+				'marginTop': '20px', 
+				'padding': '10px', 
+				'border': '1px solid #ccc',
+				'display': 'none'
+			}),
+
 		]),
 		style={"width": "100%"}
 	)
@@ -185,18 +206,18 @@ app.layout = build_layout()
 
 # Add a new callback for the reset button
 @app.callback(
-    Output("combo-dropdown", "value", allow_duplicate=True),
-    Input("reset-button", "n_clicks"),
-    prevent_initial_call=True
+	Output("combo-dropdown", "value", allow_duplicate=True),
+	Input("reset-button", "n_clicks"),
+	prevent_initial_call=True
 )
 def reset_combos(n_clicks):
-    """
-    Resets the layer-head combo selection to just show Layer 0, Head 0.
-    
-    :param n_clicks: Number of times the reset button has been clicked.
-    :return: Default list with just "0-0" selected.
-    """
-    return ["0-0"]
+	"""
+	Resets the layer-head combo selection to just show Layer 0, Head 0.
+	
+	:param n_clicks: Number of times the reset button has been clicked.
+	:return: Default list with just "0-0" selected.
+	"""
+	return ["0-0"]
 
 @app.callback(
 	Output("page-store", "data"),
@@ -444,134 +465,131 @@ def update_heatmap(input_text, selected_combos, threshold, current_page, clickDa
 	return fig
 
 @app.callback(
-    Output("all-heads-bar-chart", "figure"),
-    Input("evaluate-all-heads", "n_clicks"),
-    State("input-text", "value"),
-    State("attention-heatmap", "clickData"),
-    State("causal-intervention", "value"),
-    State("ablation-scale-slider", "value"),
-    State("sparsity-threshold-slider", "value"),
-    State("target-token-dropdown", "value")  # Keep this parameter for UI consistency
+	Output("all-heads-bar-chart", "figure"),
+	Input("evaluate-all-heads", "n_clicks"),
+	State("input-text", "value"),
+	State("attention-heatmap", "clickData"),
+	State("causal-intervention", "value"),
+	State("ablation-scale-slider", "value"),
+	State("sparsity-threshold-slider", "value"),
+	State("target-token-dropdown", "value")  # Keep this parameter for UI consistency
 )
 def update_all_heads_chart(n_clicks, input_text, clickData, causal_intervention, 
-                          ablation_scale, sparsity_threshold, target_token_id):
-    """
-    Evaluates all attention heads individually for a selected token and plots their ablation scores.
-    This always evaluates based on overall distribution change regardless of target token selection.
+						  ablation_scale, sparsity_threshold, target_token_id):
+	"""
+	Evaluates all attention heads individually for a selected token and plots their ablation scores.
+	This always evaluates based on overall distribution change regardless of target token selection.
 
-    :param n_clicks: Number of times the "Evaluate All Heads" button was clicked.
-    :param input_text: The full input text.
-    :param clickData: Click event data from the heatmap.
-    :param causal_intervention: Selected ablation method.
-    :param ablation_scale: Ablation scale factor.
-    :param sparsity_threshold: Threshold for sparsification.
-    :param target_token_id: ID of token (unused in this function, maintained for UI consistency).
-    :return: Plotly figure displaying a bar chart of ablation scores.
-    """
-    # Check if button was clicked
-    if n_clicks == 0:
-        # Return empty figure if button hasn't been clicked yet
-        return go.Figure()
-        
-    # Encode the input text to get tokens
-    full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
-    full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
-    
-    # Default to last token if no token is clicked
-    token_clicked = None
-    if clickData is not None:
-        try:
-            token_clicked = clickData["points"][0]["x"]
-            print(f"Token clicked: {token_clicked}")
-        except (KeyError, IndexError) as e:
-            print(f"Error extracting clicked token: {e}")
-            print("Defaulting to last token in the sequence")
-    
-    if token_clicked is None:
-        # If no token was clicked, explicitly set to evaluate the last token
-        token_index = len(full_tokens) - 1
-        token_clicked = full_tokens[token_index]
-        print(f"No token selected, defaulting to last token: {token_clicked}")
-    else:
-        # We need to handle the display formatting that might be present in token names
-        # Extract base token without positional suffix if present
-        clean_token = token_clicked.split('_')[0] if '_' in token_clicked else token_clicked
-        
-        # Find matching tokens in the full token list
-        matches = []
-        for i, token in enumerate(full_tokens):
-            # Clean the token for comparison
-            if token.startswith('Ġ'):  # Handle GPT-2's space prefix
-                clean_full_token = token[1:]
-            else:
-                clean_full_token = token
-                
-            if clean_full_token == clean_token:
-                matches.append(i)
-        
-        # Use the match if found
-        if matches:
-            # If there are multiple matches, try to determine which one was clicked
-            # based on position suffix or default to the first occurrence
-            if '_' in token_clicked and len(matches) > 1:
-                try:
-                    position = int(token_clicked.split('_')[1])
-                    if 1 <= position <= len(matches):
-                        token_index = matches[position - 1]
-                    else:
-                        token_index = matches[0]
-                except (ValueError, IndexError):
-                    token_index = matches[0]
-            else:
-                token_index = matches[0]
-        else:
-            # If no match found, default to the last token
-            token_index = len(full_tokens) - 1
-            token_clicked = full_tokens[token_index]
-            print(f"Could not find token match, defaulting to last token: {token_clicked}")
-        
-        print(f"Selected token: {token_clicked}, Index: {token_index}, Full token: {full_tokens[token_index] if token_index >= 0 else 'N/A'}")
-    
-    # Truncate input IDs up to the selected token (inclusive)
-    truncated_ids = full_input_ids[:, :token_index+1]
-    
-    # Compute baseline logits for the selected token
-    with torch.no_grad():
-        baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
-    baseline_probs = torch.softmax(baseline_logits, dim=-1)
-    
-    # Use the selected ablation method; default to 'standard' if none selected
-    method = causal_intervention if causal_intervention != 'none' else 'standard'
-    
-    # Evaluate all heads WITHOUT target token parameter - reverted to original behavior
-    head_scores = ablation.evaluate_all_heads(
-        truncated_ids, baseline_probs, transformer.lm_model,
-        token_index=token_index, scale=ablation_scale, 
-        ablation_method=method, sparsity_threshold=sparsity_threshold
-    )
-    
-    # Prepare labels and corresponding scores
-    labels = [f"{layer}-{head}" for (layer, head) in sorted(head_scores.keys())]
-    scores = [head_scores[(layer, head)] for (layer, head) in sorted(head_scores.keys())]
-    
-    # Create the bar chart using Plotly
-    fig = go.Figure(data=go.Bar(x=labels, y=scores))
-    
-    # Update title and y-axis - always showing distribution change metrics
-    title_text = f"Ablation Scores for Each Attention Head (Token: {token_clicked})"
-    y_axis_title = "Ablation Score (KL Divergence + Delta Top Token Probability)"
-    
-    fig.update_layout(
-        title=title_text,
-        xaxis=dict(type='category'),
-        xaxis_title="Layer-Head",
-        yaxis_title=y_axis_title,
-        xaxis_tickangle=-45,
-        template="plotly_white",
-        height=600,
-        margin=dict(l=40, r=40, t=60, b=150)
-    )
-    return fig
+	:param n_clicks: Number of times the "Evaluate All Heads" button was clicked.
+	:param input_text: The full input text.
+	:param clickData: Click event data from the heatmap.
+	:param causal_intervention: Selected ablation method.
+	:param ablation_scale: Ablation scale factor.
+	:param sparsity_threshold: Threshold for sparsification.
+	:param target_token_id: ID of token (unused in this function, maintained for UI consistency).
+	:return: Plotly figure displaying a bar chart of ablation scores.
+	"""
+	# Check if button was clicked
+	if n_clicks == 0:
+		# Return empty figure if button hasn't been clicked yet
+		return go.Figure()
+		
+	# Encode the input text to get tokens
+	full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
+	full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
+	
+	# Default to last token if no token is clicked
+	token_clicked = None
+	if clickData is not None:
+		try:
+			token_clicked = clickData["points"][0]["x"]
+		except (KeyError, IndexError) as e:
+			print(f"Error extracting clicked token: {e}")
+	
+	if token_clicked is None:
+		# If no token was clicked, explicitly set to evaluate the last token
+		token_index = len(full_tokens) - 1
+		token_clicked = full_tokens[token_index]
+		print(f"No token selected, defaulting to last token: {token_clicked}")
+	else:
+		# We need to handle the display formatting that might be present in token names
+		# Extract base token without positional suffix if present
+		clean_token = token_clicked.split('_')[0] if '_' in token_clicked else token_clicked
+		
+		# Find matching tokens in the full token list
+		matches = []
+		for i, token in enumerate(full_tokens):
+			# Clean the token for comparison
+			if token.startswith('Ġ'):  # Handle GPT-2's space prefix
+				clean_full_token = token[1:]
+			else:
+				clean_full_token = token
+				
+			if clean_full_token == clean_token:
+				matches.append(i)
+		
+		# Use the match if found
+		if matches:
+			# If there are multiple matches, try to determine which one was clicked
+			# based on position suffix or default to the first occurrence
+			if '_' in token_clicked and len(matches) > 1:
+				try:
+					position = int(token_clicked.split('_')[1])
+					if 1 <= position <= len(matches):
+						token_index = matches[position - 1]
+					else:
+						token_index = matches[0]
+				except (ValueError, IndexError):
+					token_index = matches[0]
+			else:
+				token_index = matches[0]
+		else:
+			# If no match found, default to the last token
+			token_index = len(full_tokens) - 1
+			token_clicked = full_tokens[token_index]
+			print(f"Could not find token match, defaulting to last token: {token_clicked}")
+		
+	
+	# Truncate input IDs up to the selected token (inclusive)
+	truncated_ids = full_input_ids[:, :token_index+1]
+	
+	# Compute baseline logits for the selected token
+	with torch.no_grad():
+		baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
+	baseline_probs = torch.softmax(baseline_logits, dim=-1)
+	
+	# Use the selected ablation method; default to 'standard' if none selected
+	method = causal_intervention if causal_intervention != 'none' else 'standard'
+	
+	# Evaluate all heads WITHOUT target token parameter - reverted to original behavior
+	head_scores = ablation.evaluate_all_heads(
+		truncated_ids, baseline_probs, transformer.lm_model,
+		token_index=token_index, scale=ablation_scale, 
+		ablation_method=method, sparsity_threshold=sparsity_threshold
+	)
+	
+	# Prepare labels and corresponding scores
+	labels = [f"{layer}-{head}" for (layer, head) in sorted(head_scores.keys())]
+	scores = [head_scores[(layer, head)] for (layer, head) in sorted(head_scores.keys())]
+	
+	# Create the bar chart using Plotly
+	fig = go.Figure(data=go.Bar(x=labels, y=scores))
+	
+	# Update title and y-axis - always showing distribution change metrics
+	title_text = f"Ablation Scores for Each Attention Head (Token: {token_clicked})"
+	y_axis_title = "Ablation Score (KL Divergence + Delta Top Token Probability)"
+	
+	fig.update_layout(
+		title=title_text,
+		xaxis=dict(type='category'),
+		xaxis_title="Layer-Head",
+		yaxis_title=y_axis_title,
+		xaxis_tickangle=-45,
+		template="plotly_white",
+		height=600,
+		margin=dict(l=40, r=40, t=60, b=150)
+	)
+	return fig
 
 @app.callback(
 	Output("token-info", "children"),
@@ -711,7 +729,7 @@ def update_token_info(clickData, input_text, causal_intervention,
 		   State("ablation-scale-slider", "value"),
 		   State("causal-intervention", "value"),
 		   State("sparsity-threshold-slider", "value"),
-           State("target-token-dropdown", "value")],  # Add target token state
+		   State("target-token-dropdown", "value")],  # Add target token state
 	progress=[Output("ablation-progress", "value")],
 	running=[(Output("run-ablation-study", "disabled"), True, False)],
 	manager=long_callback_manager,
@@ -721,8 +739,8 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 					   ablation_scale, causal_intervention, sparsity_threshold, target_token_id):
 	"""
 	Searches for the best set of heads to ablate based on the selected optimization target.
-    If target_token_id is 'N/A', maximizes overall distribution change.
-    If a token is selected, finds heads that maximize that token's probability.
+	If target_token_id is 'N/A', maximizes overall distribution change.
+	If a token is selected, finds heads that maximize that token's probability.
 	
 	:param progress: Callback function to update progress.
 	:param n_clicks: Number of times the study button was clicked.
@@ -732,7 +750,7 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	:param ablation_scale: Scale factor for ablation.
 	:param causal_intervention: Selected ablation method.
 	:param sparsity_threshold: Threshold for sparsification.
-    :param target_token_id: ID of the token to maximize probability for, or 'N/A'.
+	:param target_token_id: ID of the token to maximize probability for, or 'N/A'.
 	:return: Tuple of updated ablation result HTML and updated combo selections.
 	"""
 	if clickData is None:
@@ -854,54 +872,166 @@ def run_ablation_study(progress, n_clicks, input_text, clickData, current_combos
 	return final_result, best_set_str
 
 @app.callback(
-    Output("target-token-dropdown", "options"),
-    [Input("attention-heatmap", "clickData"),
-     Input("input-text", "value")]
+	Output("target-token-dropdown", "options"),
+	[Input("attention-heatmap", "clickData"),
+	 Input("input-text", "value")]
 )
 def update_target_dropdown(clickData, input_text):
-    """
-    Updates the target token dropdown with the top 5 predicted next tokens when a token is clicked.
-    
-    :param clickData: Click event data from the heatmap.
-    :param input_text: The user-provided text.
-    :return: Updated dropdown options with N/A and top 5 predicted tokens.
-    """
-    if clickData is None:
-        return [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
-    
-    try:
-        token_clicked = clickData["points"][0]["x"]
-    except (KeyError, IndexError):
-        return [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
-    
-    # Encode the input text
-    full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
-    full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
-    
-    # Find token index, defaulting to last token if not found
-    try:
-        token_index = full_tokens.index(token_clicked)
-    except ValueError:
-        token_index = len(full_tokens) - 1
-    
-    truncated_ids = full_input_ids[:, :token_index+1]
-    
-    # Get baseline predictions for the token
-    with torch.no_grad():
-        baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
-    baseline_probs = torch.softmax(baseline_logits, dim=-1)
-    
-    # Get top 5 tokens
-    baseline_topk = 5
-    baseline_top_probs, baseline_top_indices = torch.topk(baseline_probs, baseline_topk)
-    baseline_top_tokens = transformer.tokenizer.convert_ids_to_tokens(baseline_top_indices.tolist())
-    
-    # Create dropdown options with N/A and top 5 tokens
-    options = [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
-    for token, prob, token_id in zip(baseline_top_tokens, baseline_top_probs.tolist(), baseline_top_indices.tolist()):
-        options.append({'label': f"{token} ({prob:.4f})", 'value': str(token_id)})
-    
-    return options
+	"""
+	Updates the target token dropdown with the top 5 predicted next tokens when a token is clicked.
+	
+	:param clickData: Click event data from the heatmap.
+	:param input_text: The user-provided text.
+	:return: Updated dropdown options with N/A and top 5 predicted tokens.
+	"""
+	if clickData is None:
+		return [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
+	
+	try:
+		token_clicked = clickData["points"][0]["x"]
+	except (KeyError, IndexError):
+		return [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
+	
+	# Encode the input text
+	full_input_ids = transformer.tokenizer.encode(input_text, return_tensors="pt")
+	full_tokens = transformer.tokenizer.convert_ids_to_tokens(full_input_ids[0])
+	
+	# Find token index, defaulting to last token if not found
+	try:
+		token_index = full_tokens.index(token_clicked)
+	except ValueError:
+		token_index = len(full_tokens) - 1
+	
+	truncated_ids = full_input_ids[:, :token_index+1]
+	
+	# Get baseline predictions for the token
+	with torch.no_grad():
+		baseline_logits = transformer.lm_model(truncated_ids).logits[0, token_index, :]
+	baseline_probs = torch.softmax(baseline_logits, dim=-1)
+	
+	# Get top 5 tokens
+	baseline_topk = 5
+	baseline_top_probs, baseline_top_indices = torch.topk(baseline_probs, baseline_topk)
+	baseline_top_tokens = transformer.tokenizer.convert_ids_to_tokens(baseline_top_indices.tolist())
+	
+	# Create dropdown options with N/A and top 5 tokens
+	options = [{'label': 'N/A (maximize change)', 'value': 'N/A'}]
+	for token, prob, token_id in zip(baseline_top_tokens, baseline_top_probs.tolist(), baseline_top_indices.tolist()):
+		options.append({'label': f"{token} ({prob:.4f})", 'value': str(token_id)})
+	
+	return options
+
+@app.long_callback(
+	output=[
+		Output("circuit-container", "children"),
+		Output("circuit-container", "style"),
+		Output("circuit-progress", "value")
+	],
+	inputs=[Input("discover-circuit-btn", "n_clicks")],
+	state=[
+		State("input-text", "value"),
+		State("combo-dropdown", "value"),
+		State("target-token-dropdown", "value")
+	],
+	progress=[Output("circuit-progress", "value")],
+	running=[
+		(Output("discover-circuit-btn", "disabled"), True, False)
+	],
+	manager=long_callback_manager,
+	prevent_initial_call=True
+)
+def discover_attention_circuit(progress, n_clicks, input_text, selected_combos, target_token_id):
+	"""
+	Discovers and visualizes attention circuits in the transformer model.
+	Uses optimized algorithms for circuit discovery to improve performance.
+	
+	:param progress: Callback function to update progress.
+	:param n_clicks: Number of times the discover circuit button was clicked.
+	:param input_text: The input text to analyze.
+	:param selected_combos: Selected layer-head combos from the dropdown.
+	:param target_token_id: ID of target token, or 'N/A'.
+	:return: Tuple of (circuit visualization HTML, container style dict, progress value)
+	"""
+	if not selected_combos or not input_text:
+		return html.Div("Please select attention heads and provide input text."), {'display': 'block'}, 100
+	
+	# Parse selected combos
+	important_heads = []
+	for combo in selected_combos:
+		try:
+			layer_str, head_str = combo.split("-")
+			important_heads.append((int(layer_str), int(head_str)))
+		except:
+			continue
+			
+	if not important_heads:
+		return html.Div("Could not parse selected attention heads."), {'display': 'block'}, 100
+	
+	# Initial progress update
+	progress(10)
+	
+	# Parse target token ID
+	specific_token_id = None if target_token_id == 'N/A' else int(target_token_id)
+	
+	# Create circuit finder with progress monitoring
+	circuit_finder = CircuitFinder(transformer.lm_model, transformer.tokenizer)
+	
+	# Build circuit with progress reporting
+	try:
+		circuit_graph = circuit_finder.build_circuit_from_ablation(
+			important_heads=important_heads,
+			input_text=input_text,
+			target_token_id=specific_token_id,
+			progress_callback=progress
+		)
+	except Exception as e:
+		return html.Div(f"Error building circuit: {str(e)}"), {'display': 'block'}, 100
+	
+	# Generate circuit visualization
+	plt_buf = io.BytesIO()
+	circuit_finder.visualize_circuit(save_path=plt_buf)
+	plt_buf.seek(0)
+	
+	# Convert plot to base64 image
+	img_str = base64.b64encode(plt_buf.read()).decode('utf-8')
+	
+	# Create figure explanation based on graph properties
+	edge_count = circuit_graph.number_of_edges()
+	node_count = circuit_graph.number_of_nodes()
+	
+	# Generate helpful explanation text with performance note
+	explanation = f"""
+	### Attention Circuit Analysis
+	
+	This visualization shows how information flows through the {len(important_heads)} 
+	selected attention heads for the input: "{input_text}"
+	
+	- **Blue squares**: Input tokens
+	- **Green circles**: Attention heads (Layer-Head)
+	- **Red circle**: Target token (if specified)
+	- **Edge thickness**: Strength of connection between components
+	
+	Circuit Statistics:
+	- {node_count} total nodes
+	- {edge_count} significant connections
+	- {len([n for n in circuit_graph.nodes if circuit_graph.nodes[n].get('type') == 'attention_head'])} attention heads in circuit
+	
+	Note: This visualization uses optimized algorithms that prioritize connections between adjacent layers
+	for better performance.
+	"""
+	
+	# Create circuit visualization with explanation
+	circuit_viz = html.Div([
+		html.H4("Transformer Circuit Visualization"),
+		dcc.Markdown(explanation),
+		html.Img(src=f'data:image/png;base64,{img_str}', style={'width': '100%', 'marginTop': '20px'})
+	])
+	
+	# Final progress update
+	progress(100)
+	
+	# Return visualization with display style and progress 
+	return circuit_viz, {'display': 'block', 'marginTop': '20px', 'padding': '10px', 'border': '1px solid #ccc'}, 100
 
 if __name__ == '__main__':
 	app.run_server(debug=True)
