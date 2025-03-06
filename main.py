@@ -330,11 +330,11 @@ def update_heatmap(input_text, selected_combos, threshold, current_page, clickDa
 		# Create heatmap with explicit axis settings
 		heatmap = go.Heatmap(
 			z=attn_data,
-			x=tokens,  # from tokens
-			y=tokens,  # to tokens
+			x=tokens,  # to tokens
+			y=tokens,  # from tokens
 			colorscale='Viridis',
 			colorbar=dict(title="Attention Weight"),
-			hovertemplate="From Token: %{x}<br>To Token: %{y}<br>Attention: %{z:.4f}<extra></extra>"
+			hovertemplate="From Token: %{y}<br>To Token: %{x}<br>Attention: %{z:.4f}<extra></extra>"
 		)
 
 		row = (i // cols) + 1
