@@ -164,6 +164,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 
 	If target_token_id is None: Finds heads that maximize change in overall distribution
 	If target_token_id is provided: Finds heads that maximize probability of the target token
+	Stops early if target token reaches rank 1 (becomes the top predicted token).
 
 	The function evaluates individual heads, pre-selects top candidates, and then uses an iterative pair
 	search followed by greedy expansion to identify the optimal combination of heads.
@@ -273,6 +274,36 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 			best_set.append(best_candidate)
 			best_score = candidate_score
 			
+			# Check if we're targeting a specific token and it has reached rank 1
+			if target_token_id is not None:
+				# Run inference with current best set to get latest probabilities
+				hook_handles = []
+				for (layer, head) in best_set:
+					if ablation_method == 'standard':
+						hook = make_ablate_hook(head, scale=scale, lm_model=lm_model)
+					elif ablation_method == 'permute':
+						hook = make_permutation_hook(head, lm_model=lm_model)
+					elif ablation_method == 'sparsify':
+						hook = make_sparsification_hook(head, sparsity_threshold, lm_model=lm_model)
+					else:
+						hook = make_ablate_hook(head, scale=scale, lm_model=lm_model)
+					hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(hook)
+					hook_handles.append(hook_handle)
+				
+				with torch.no_grad():
+					ablated_logits = lm_model(truncated_ids).logits[0, token_index, :]
+				
+				for handle in hook_handles:
+					handle.remove()
+					
+				ablated_probs = torch.softmax(ablated_logits, dim=-1)
+				
+				# Check if target token is now the top prediction
+				top_token_id = torch.argmax(ablated_probs).item()
+				if top_token_id == target_token_id:
+					print(f"Target token reached rank 1! Stopping ablation search early after adding {len(best_set)} heads.")
+					break  # Early stopping when target token is top prediction
+		
 		iteration_count += 1
 		if progress_callback is not None:
 			progress_callback(int(40 + (iteration_count / total_iterations * 60)))
