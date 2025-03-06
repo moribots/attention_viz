@@ -129,6 +129,7 @@ class CircuitFinder:
                                    progress_callback=None):
         """
         Build a circuit graph from ablation study results and path patching.
+        Also computes what token each head is most strongly predicting.
         
         :param important_heads: List of (layer, head) tuples from ablation study
         :param input_text: The input text for circuit analysis
@@ -144,14 +145,27 @@ class CircuitFinder:
         # Create directed graph
         G = nx.DiGraph()
         
-        # Add nodes for each important head
+        # Encode input and get tokens
+        input_ids = self.tokenizer.encode(input_text, return_tensors="pt")
+        input_ids_single = input_ids[0]
+        tokens = self.tokenizer.convert_ids_to_tokens(input_ids_single)
+        
+        # Get head predictions for each head
+        head_predictions = self._get_head_predictions(input_text, important_heads)
+        
+        # Add nodes for each important head with prediction information
         for layer, head in important_heads:
             node_id = f"L{layer}H{head}"
-            G.add_node(node_id, layer=layer, head=head, type="attention_head")
+            
+            # Get prediction info for this head
+            pred_info = head_predictions.get((layer, head), {})
+            pred_token = pred_info.get('token', '??')
+            pred_prob = pred_info.get('prob', 0.0)
+            
+            G.add_node(node_id, layer=layer, head=head, type="attention_head",
+                      pred_token=pred_token, pred_prob=pred_prob)
         
         # Add input token nodes
-        input_ids = self.tokenizer.encode(input_text, return_tensors="pt")[0]
-        tokens = self.tokenizer.convert_ids_to_tokens(input_ids)
         for i, token in enumerate(tokens):
             node_id = f"T{i}"
             G.add_node(node_id, token=token, position=i, type="token")
@@ -261,7 +275,8 @@ class CircuitFinder:
     def visualize_circuit(self, save_path=None):
         """
         Visualize the identified circuit as a directed graph.
-        Preserves the original order of tokens in the visualization.
+        Preserves the original order of tokens in the visualization
+        and shows predicted tokens for each attention head.
         
         :param save_path: Optional path to save the visualization
         :return: None (displays or saves the visualization)
@@ -314,7 +329,7 @@ class CircuitFinder:
         nx.draw_networkx_nodes(G, pos, nodelist=output_nodes, node_color='salmon',
                               node_size=800, alpha=0.8)
         
-        # Add node labels
+        # Add node labels with prediction information
         labels = {}
         for node, data in G.nodes(data=True):
             if data.get('type') == "token":
@@ -323,11 +338,17 @@ class CircuitFinder:
                 token = data.get('token', node)
                 labels[node] = f"{position}:{token}"
             elif data.get('type') == "attention_head":
-                labels[node] = f"L{data.get('layer')}H{data.get('head')}"
+                # Include predicted token in label
+                pred_token = data.get('pred_token', '??')
+                pred_prob = data.get('pred_prob', 0.0)
+                if pred_prob > 0.05:  # Only show if probability is significant
+                    labels[node] = f"L{data.get('layer')}H{data.get('head')}\n→{pred_token} ({pred_prob:.2f})"
+                else:
+                    labels[node] = f"L{data.get('layer')}H{data.get('head')}"
             else:
                 labels[node] = "OUTPUT"
                 
-        nx.draw_networkx_labels(G, pos, labels=labels, font_size=10)
+        nx.draw_networkx_labels(G, pos, labels=labels, font_size=9, font_family="monospace")
         
         # Draw edges with width based on weight
         edges = G.edges(data=True)
@@ -512,3 +533,78 @@ class CircuitFinder:
         """
         # Use simple heuristic that later layers have more influence
         return 0.1 + (0.03 * layer) + (0.01 * (head % 3))
+    
+    def _get_head_predictions(self, input_text, heads):
+        """
+        Compute what token each attention head is most strongly predicting.
+        Implements a logit lens-like approach to see what each head is "pushing toward".
+        
+        :param input_text: The input text to analyze
+        :param heads: List of (layer, head) tuples to get predictions for
+        :return: Dict mapping (layer, head) tuples to prediction info (token and probability)
+        """
+        input_ids = self.tokenizer.encode(input_text, return_tensors="pt")
+        results = {}
+        
+        # For each head, we need to:
+        # 1. Get the output of just that head
+        # 2. Project it to logits (similar to what the LM head does)
+        # 3. Find the top predicted token
+        
+        with torch.no_grad():
+            for layer, head in heads:
+                # Function to capture just this head's output
+                head_output = None
+                
+                def capture_head_output(module, inp, output):
+                    nonlocal head_output
+                    # Get output from this head
+                    if isinstance(output, tuple):
+                        attn_output = output[0]
+                    else:
+                        attn_output = output
+                    
+                    head_dim = self.model.config.hidden_size // self.model.config.n_head
+                    start_idx = head * head_dim
+                    end_idx = (head + 1) * head_dim
+                    
+                    # Extract just this head's contribution
+                    head_slice = attn_output[:, :, start_idx:end_idx]
+                    
+                    # Project to the full hidden dimension using a simple expansion
+                    # Not exactly what the model does, but a reasonable approximation
+                    projected = head_slice.repeat(1, 1, self.model.config.n_head)
+                    head_output = projected
+                    return output
+                
+                # Register the capture hook
+                hook = self.model.transformer.h[layer].attn.register_forward_hook(capture_head_output)
+                
+                # Forward pass 
+                _ = self.model(input_ids)
+                
+                # Clean up the hook
+                hook.remove()
+                
+                # Use LM head to get logits from the head's output
+                # This is a crude but effective approximation
+                if head_output is not None:
+                    # Use final token position for prediction
+                    final_pos_output = head_output[0, -1, :]
+                    
+                    # Project to vocabulary
+                    logits = self.model.lm_head(final_pos_output.unsqueeze(0))
+                    probs = torch.softmax(logits[0], dim=-1)
+                    
+                    # Get top prediction
+                    top_prob, top_token_id = torch.max(probs, dim=-1)
+                    top_token = self.tokenizer.decode([top_token_id.item()]).strip()
+                    
+                    results[(layer, head)] = {
+                        'token': top_token,
+                        'prob': top_prob.item()
+                    }
+                    
+                    print(f"Layer {layer}, Head {head}: Predicts '{top_token}' with probability {top_prob.item():.3f}")
+        
+        return results
