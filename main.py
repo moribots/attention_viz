@@ -1009,8 +1009,23 @@ def discover_attention_circuit(progress, n_clicks, input_text, selected_combos, 
 	# Initial progress update
 	progress(10)
 	
-	# Parse target token ID
-	specific_token_id = None if target_token_id == 'N/A' else int(target_token_id)
+	# Proper handling of target token ID - ensure it's an integer or None
+	try:
+		if target_token_id == 'N/A' or target_token_id is None:
+			specific_token_id = None
+		else:
+			# Convert to integer explicitly, handling both string and tensor cases
+			if isinstance(target_token_id, str):
+				specific_token_id = int(target_token_id)
+			elif isinstance(target_token_id, torch.Tensor):
+				specific_token_id = target_token_id.item()
+			else:
+				specific_token_id = int(target_token_id)
+				
+		print(f"Using target token ID: {specific_token_id}, type: {type(specific_token_id)}")
+	except (ValueError, TypeError) as e:
+		print(f"Error converting target token ID: {e}, using None instead")
+		specific_token_id = None
 	
 	# Create circuit finder with progress monitoring
 	circuit_finder = CircuitFinder(transformer.lm_model, transformer.tokenizer)
@@ -1020,51 +1035,63 @@ def discover_attention_circuit(progress, n_clicks, input_text, selected_combos, 
 		circuit_graph = circuit_finder.build_circuit_from_ablation(
 			important_heads=important_heads,
 			input_text=input_text,
-			target_token_id=specific_token_id,
+			target_token_id=specific_token_id,  # Pass the properly converted ID
 			progress_callback=progress
 		)
 	except Exception as e:
-		return html.Div(f"Error building circuit: {str(e)}"), {'display': 'block'}, 100
+		import traceback
+		traceback_str = traceback.format_exc()
+		error_message = f"Error building circuit: {str(e)}\n\nTraceback:\n{traceback_str}"
+		return html.Div([
+			html.Pre(error_message, style={'whiteSpace': 'pre-wrap', 'overflowX': 'auto'})
+		]), {'display': 'block'}, 100
 	
 	# Generate circuit visualization
 	plt_buf = io.BytesIO()
-	circuit_finder.visualize_circuit(save_path=plt_buf)
-	plt_buf.seek(0)
-	
-	# Convert plot to base64 image
-	img_str = base64.b64encode(plt_buf.read()).decode('utf-8')
-	
-	# Create figure explanation based on graph properties
-	edge_count = circuit_graph.number_of_edges()
-	node_count = circuit_graph.number_of_nodes()
-	
-	# Generate helpful explanation text with performance note
-	explanation = f"""
-	### Attention Circuit Analysis
-	
-	This visualization shows how information flows through the {len(important_heads)} 
-	selected attention heads for the input: "{input_text}"
-	
-	- **Blue squares**: Input tokens
-	- **Green circles**: Attention heads (Layer-Head)
-	- **Red circle**: Target token (if specified)
-	- **Edge thickness**: Strength of connection between components
-	
-	Circuit Statistics:
-	- {node_count} total nodes
-	- {edge_count} significant connections
-	- {len([n for n in circuit_graph.nodes if circuit_graph.nodes[n].get('type') == 'attention_head'])} attention heads in circuit
-	
-	Note: This visualization uses optimized algorithms that prioritize connections between adjacent layers
-	for better performance.
-	"""
-	
-	# Create circuit visualization with explanation
-	circuit_viz = html.Div([
-		html.H4("Transformer Circuit Visualization"),
-		dcc.Markdown(explanation),
-		html.Img(src=f'data:image/png;base64,{img_str}', style={'width': '100%', 'marginTop': '20px'})
-	])
+	try:
+		circuit_finder.visualize_circuit(save_path=plt_buf)
+		plt_buf.seek(0)
+		
+		# Convert plot to base64 image
+		img_str = base64.b64encode(plt_buf.read()).decode('utf-8')
+		
+		# Create figure explanation based on graph properties
+		edge_count = circuit_graph.number_of_edges()
+		node_count = circuit_graph.number_of_nodes()
+		
+		# Generate helpful explanation text with performance note
+		explanation = f"""
+		### Attention Circuit Analysis
+		
+		This visualization shows how information flows through the {len(important_heads)} 
+		selected attention heads for the input: "{input_text}"
+		
+		- **Blue squares**: Input tokens
+		- **Green circles**: Attention heads (Layer-Head)
+		- **Red circle**: Target token (if specified)
+		- **Edge thickness**: Strength of connection between components
+		
+		Circuit Statistics:
+		- {node_count} total nodes
+		- {edge_count} significant connections
+		- {len([n for n in circuit_graph.nodes if circuit_graph.nodes[n].get('type') == 'attention_head'])} attention heads in circuit
+		
+		Note: This visualization uses optimized algorithms that prioritize connections between adjacent layers
+		for better performance.
+		"""
+		
+		# Create circuit visualization with explanation
+		circuit_viz = html.Div([
+			html.H4("Transformer Circuit Visualization"),
+			dcc.Markdown(explanation),
+			html.Img(src=f'data:image/png;base64,{img_str}', style={'width': '100%', 'marginTop': '20px'})
+		])
+	except Exception as viz_error:
+		circuit_viz = html.Div([
+			html.H4("Circuit Discovery Successful, Visualization Error"),
+			html.P(f"The circuit was successfully built with {circuit_graph.number_of_nodes()} nodes, but there was an error generating the visualization:"),
+			html.Pre(str(viz_error))
+		])
 	
 	# Final progress update
 	progress(100)
