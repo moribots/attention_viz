@@ -55,6 +55,15 @@ def build_layout():
 		for head in range(transformer.num_heads)
 	]
 	
+	# Define example prompt options
+	example_prompts = [
+		{"label": "The key to the cabinets", "value": "The key to the cabinets"}, # subject-verb agreement ambiguity (singular vs plural)
+		{"label": "When Mary and John went to the store, John gave a drink to", # co-reference resolution
+         "value": "When Mary and John went to the store, John gave a drink to"},
+		{"label": "The trophy doesn't fit in the brown suitcase because it's too", # ambiguous pronoun reference.
+         "value": "The trophy doesn't fit in the brown suitcase because it's too"}
+	]
+	
 	sidebar = dbc.Card(
 		[
 			dbc.CardHeader("Instructions"),
@@ -71,6 +80,18 @@ def build_layout():
 	
 	main_content = dbc.Card(
 		dbc.CardBody([
+			 # Example prompts dropdown
+			html.Div([
+				html.Label("Select Example Prompt:"),
+				dcc.Dropdown(
+					id="example-dropdown",
+					options=example_prompts,
+					placeholder="Select an example prompt or enter your own below",
+					clearable=True,
+					style={'width': '100%'}
+				)
+			], style={'marginBottom': '20px'}),
+			
 			# Input text area
 			html.Div([
 				html.Label("Input Text:"),
@@ -203,6 +224,24 @@ def build_layout():
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP],
 				long_callback_manager=long_callback_manager)
 app.layout = build_layout()
+
+# Add callback for example prompt selection
+@app.callback(
+	Output("input-text", "value"),
+	Input("example-dropdown", "value"),
+	prevent_initial_call=True
+)
+def update_input_text_from_example(selected_example):
+	"""
+	Updates the input text field when an example prompt is selected.
+	
+	:param selected_example: The selected example prompt.
+	:return: The selected prompt to be used as input text.
+	"""
+	if selected_example:
+		return selected_example
+	# If dropdown is cleared, keep the current value
+	raise dash.exceptions.PreventUpdate
 
 # Add a new callback for the reset button
 @app.callback(
