@@ -42,3 +42,13 @@ PATH_PATCHING_DUMMY_EFFECT = 0.1
 # Progress update for run_path_patching: start and range values
 PATH_PATCHING_PROGRESS_START = 40
 PATH_PATCHING_PROGRESS_RANGE = 30
+
+# Main app constants
+NUM_COMBOS = 4                      # Number of layer-head combos per page in the heatmap
+SUBPLOT_SIZE = 650                  # Base size for each subplot in the heatmap grid
+HEATMAP_MARGIN = {"l": 80, "r": 40, "t": 60, "b": 150}  # Margins for the overall heatmap figure
+TOP_K = 5                           # Number of top tokens to display in predictions/dropdowns
+SLIDER_MIN = 0.0
+SLIDER_MAX = 1.0
+SLIDER_STEP = 0.01
+SLIDER_MARKS = {i/10: f"{i/10}" for i in range(0, 11)}
