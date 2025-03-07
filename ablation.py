@@ -1,125 +1,36 @@
 """
-This module contains functions to create various ablation hooks (standard, permutation,
-and sparsification) and functions to evaluate the impact of ablating a set of attention heads.
+Module containing functions to evaluate the impact of ablating attention heads
+and to find the best combination of heads to ablate.
+
+The evaluation is based on changes in the probability distribution for a selected token.
+This module leverages the ablation hooks defined in ablation_hooks.py.
 """
 
 import torch
+from ablation_hooks import make_ablate_hook, make_permutation_hook, make_sparsification_hook
+from config import DEFAULT_SCALE, DEFAULT_SPARSITY_THRESHOLD, EPSILON, INITIAL_PROGRESS, FINAL_PROGRESS, PRESELECTION_FRACTION, DEFAULT_MAX_HEAD_LAYER_PAIRS
 
-def make_ablate_hook(selected_head, scale=0.0, lm_model=None):
-	"""
-	Standard Ablation Hook.
-	
-	This hook scales the output for the selected head by the given factor.
-	A scale of 0.0 effectively removes the head's contribution.
-	
-	:param selected_head: Index of the head to ablate.
-	:param scale: Scale factor (0.0 means complete removal).
-	:param lm_model: The language model instance to access configuration.
-	:return: A forward hook function.
-	"""
-	def hook(module, input, output):
-		# Calculate head dimension based on model configuration
-		head_dim = lm_model.config.hidden_size // lm_model.config.n_head
-		# Determine the slice of the output corresponding to the head
-		start = selected_head * head_dim
-		end = start + head_dim
-		if isinstance(output, tuple):
-			attn_output = output[0]
-			# Clone output to avoid in-place modifications
-			attn_output_clone = attn_output.clone()
-			# Inline comment: Scale out the head’s contribution
-			attn_output_clone[:, :, start:end] *= scale
-			return (attn_output_clone,) + output[1:]
-		else:
-			output_clone = output.clone()
-			output_clone[:, :, start:end] *= scale
-			return output_clone
-	return hook
-
-def make_permutation_hook(selected_head, lm_model=None):
-	"""
-	Permutation Ablation Hook.
-	
-	This hook randomly permutes the outputs of the selected head along the token dimension.
-	I use this to check if the exact ordering is critical for performance.
-	
-	:param selected_head: Index of the head to permute.
-	:param lm_model: The language model instance to access configuration.
-	:return: A forward hook function.
-	"""
-	def hook(module, input, output):
-		head_dim = lm_model.config.hidden_size // lm_model.config.n_head
-		start = selected_head * head_dim
-		end = start + head_dim
-		if isinstance(output, tuple):
-			attn_output = output[0]
-			attn_output_clone = attn_output.clone()
-			# Loop over batch elements
-			for i in range(attn_output_clone.size(0)):
-				# Generate a random permutation of token positions
-				perm = torch.randperm(attn_output_clone.size(1))
-				# Inline comment: Apply the permutation only to the selected head slice
-				attn_output_clone[i, :, start:end] = attn_output_clone[i, perm, start:end]
-			return (attn_output_clone,) + output[1:]
-		else:
-			output_clone = output.clone()
-			for i in range(output_clone.size(0)):
-				perm = torch.randperm(output_clone.size(1))
-				output_clone[i, :, start:end] = output_clone[i, perm, start:end]
-			return output_clone
-	return hook
-
-def make_sparsification_hook(selected_head, sparsity_threshold, lm_model=None):
-	"""
-	Structured Sparsification Hook.
-	
-	This hook zeros out small values in the selected head's output that fall below the given threshold.
-	
-	:param selected_head: Index of the head.
-	:param sparsity_threshold: Values below this threshold are zeroed.
-	:param lm_model: The language model instance to access configuration.
-	:return: A forward hook function.
-	"""
-	def hook(module, input, output):
-		head_dim = lm_model.config.hidden_size // lm_model.config.n_head
-		start = selected_head * head_dim
-		end = start + head_dim
-		if isinstance(output, tuple):
-			attn_output = output[0]
-			attn_output_clone = attn_output.clone()
-			# Create a mask where absolute values are below the threshold
-			mask = torch.abs(attn_output_clone[:, :, start:end]) < sparsity_threshold
-			# Inline comment: Zero out the low-importance activations
-			attn_output_clone[:, :, start:end] = attn_output_clone[:, :, start:end].masked_fill(mask, 0)
-			return (attn_output_clone,) + output[1:]
-		else:
-			output_clone = output.clone()
-			mask = torch.abs(output_clone[:, :, start:end]) < sparsity_threshold
-			output_clone[:, :, start:end] = output_clone[:, :, start:end].masked_fill(mask, 0)
-			return output_clone
-	return hook
-
-def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, token_index=-1, scale=0.0, ablation_method='standard',
-					   sparsity_threshold=0.1, lm_model=None, epsilon=1e-10, target_token_id=None):
+def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, token_index=-1, scale=DEFAULT_SCALE, ablation_method='standard',
+					   sparsity_threshold=DEFAULT_SPARSITY_THRESHOLD, lm_model=None, epsilon=EPSILON, target_token_id=None):
 	"""
 	Evaluate the impact of ablating a given set of attention heads for a selected token.
 
-	This function computes a score for the token at the specified token_index.
+	The function computes a score for the token at the specified token_index.
 	If target_token_id is None, the score is based on the KL divergence between the baseline 
-	and ablated probability distributions, plus the change in the top token's probability.
-	If target_token_id is provided, the score is the probability of that specific token.
+	and ablated probability distributions plus the change in the top token's probability.
+	If target_token_id is provided, the score is simply the probability of that token.
 
 	:param truncated_ids: Torch tensor of input token IDs up to (and including) the token of interest.
 	:param baseline_probs: Baseline next-token probability distribution for the token at token_index.
 	:param ablation_set: List of (layer, head) tuples representing the heads to ablate.
-	:param token_index: The index of the token to evaluate (default is -1, i.e. the last token).
-	:param scale: Scale factor for standard ablation (0.0 indicates full ablation).
+	:param token_index: The index of the token to evaluate (default: last token, -1).
+	:param scale: Scale factor for standard ablation (default: DEFAULT_SCALE).
 	:param ablation_method: Method of ablation ('standard', 'permute', or 'sparsify').
-	:param sparsity_threshold: Threshold for zeroing small activations (used in sparsification).
+	:param sparsity_threshold: Threshold for zeroing small activations (default: DEFAULT_SPARSITY_THRESHOLD).
 	:param lm_model: The language model instance.
-	:param epsilon: Small constant to avoid division by zero.
-	:param target_token_id: Optional token ID to maximize probability for.
-	:return: Ablation score as a float. Higher is better.
+	:param epsilon: Small constant to avoid division by zero (default: EPSILON).
+	:param target_token_id: Optional token ID for which to maximize the probability.
+	:return: Ablation score as a float. Higher score indicates a larger impact.
 	"""
 	hook_handles = []
 	# Attach the appropriate hook for each head in the ablation set.
@@ -135,46 +46,47 @@ def evaluate_candidate(truncated_ids, baseline_probs, ablation_set, token_index=
 		hook_handle = lm_model.transformer.h[layer].attn.register_forward_hook(hook)
 		hook_handles.append(hook_handle)
 	
-	# Compute the logits for the selected token using the provided token_index.
+	# Compute the logits for the selected token.
 	with torch.no_grad():
 		ablated_logits = lm_model(truncated_ids).logits[0, token_index, :]
 	
-	# Remove hooks to reset the model.
+	# Remove hooks to reset the model state.
 	for handle in hook_handles:
 		handle.remove()
 	
 	ablated_probs = torch.softmax(ablated_logits, dim=-1)
 	
-	# If we're targeting a specific token, return its probability (higher is better)
+	# Return probability for target token if specified.
 	if target_token_id is not None:
 		return ablated_probs[target_token_id].item()
 	
-	# Otherwise use the default scoring method (higher is better for more change)
+	# Compute score based on KL divergence and change in top token probability.
 	kl_div = torch.sum(baseline_probs * torch.log((baseline_probs + epsilon) / (ablated_probs + epsilon))).item()
 	delta_top_prob = baseline_probs.max().item() - ablated_probs.max().item()
 	combined_score = 1.0 * kl_div + 1.0 * delta_top_prob
 	return combined_score
 
 
-def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_head_layer_pairs=10, scale=0.0, ablation_method='standard',
-							  sparsity_threshold=0.1, lm_model=None, progress_callback=None, search_strategy='greedy', 
-                              target_token_id=None):
+def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_head_layer_pairs=DEFAULT_MAX_HEAD_LAYER_PAIRS, scale=DEFAULT_SCALE, ablation_method='standard',
+							  sparsity_threshold=DEFAULT_SPARSITY_THRESHOLD, lm_model=None, progress_callback=None, search_strategy='greedy', 
+							  target_token_id=None):
 	"""
 	Find the best combination of attention heads to ablate.
 
-	If target_token_id is None: Finds heads that maximize change in overall distribution
-	If target_token_id is provided: Finds heads that maximize probability of the target token
-	Stops early if target token reaches rank 1 (becomes the top predicted token).
-
-	The function evaluates individual heads, pre-selects top candidates, and then uses an iterative pair
-	search followed by greedy expansion to identify the optimal combination of heads.
+	Depending on whether a target token is specified, the function either:
+	 - Maximizes the overall change in distribution.
+	 - Maximizes the probability of the target token.
+	 
+	It stops early if the target token becomes the top prediction.
+	The search proceeds by evaluating individual candidates, preselecting top ones,
+	optionally performing a pair search (for 'iterative' strategy), and then greedily expanding the set.
 
 	:param truncated_ids: Torch tensor of input token IDs up to the token of interest.
 	:param baseline_probs: Baseline probability distribution for the token at token_index.
-	:param token_index: The index of the token to evaluate.
-	:param max_head_layer_pairs: Maximum number of heads to ablate.
+	:param token_index: Index of the token to evaluate.
+	:param max_head_layer_pairs: Maximum number of heads to ablate (default: DEFAULT_MAX_HEAD_LAYER_PAIRS).
 	:param scale: Ablation scale factor.
-	:param ablation_method: Ablation method ('standard', 'permute', or 'sparsify').
+	:param ablation_method: Method of ablation ('standard', 'permute', 'sparsify').
 	:param sparsity_threshold: Threshold for sparsification.
 	:param lm_model: The language model instance.
 	:param progress_callback: Callback function to report progress.
@@ -188,7 +100,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 	candidate_scores = []
 	total_candidates = len(candidate_list)
 	
-	# Evaluate each candidate head
+	# Evaluate each candidate head.
 	for idx, candidate in enumerate(candidate_list):
 		score = evaluate_candidate(
 			truncated_ids, baseline_probs, [candidate],
@@ -198,17 +110,16 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 		)
 		candidate_scores.append((candidate, score))
 		if progress_callback is not None:
-			progress_callback(int((idx + 1) / total_candidates * 40))
+			progress_callback(int((idx + 1) / total_candidates * INITIAL_PROGRESS))
 	
-	# Sort candidates by score
-	# - For target token maximization: higher scores are better (higher probability)
-	# - For distribution change: higher scores are better (more change)
+	# Sort candidates by score (higher is better).
 	candidate_scores.sort(key=lambda x: x[1], reverse=True)
 	
-	# Pre-select the top 20% of candidates
-	preselected = [cand for cand, _ in candidate_scores[:max(1, len(candidate_scores) // 5)]]
+	# Pre-select the top candidates based on the preselection fraction.
+	preselected_count = max(1, int(len(candidate_scores) * PRESELECTION_FRACTION))
+	preselected = [cand for cand, _ in candidate_scores[:preselected_count]]
 
-	# Initialize best_set and best_score with an empty set
+	# Initialize the best set and score using an empty ablation set.
 	best_set = []
 	best_score = evaluate_candidate(
 		truncated_ids, baseline_probs, best_set,
@@ -217,10 +128,10 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 		target_token_id=target_token_id
 	)
 	
-	# Optional pair search if enabled
+	# Optional pair search for iterative strategy.
 	if search_strategy == 'iterative' and max_head_layer_pairs >= 2 and len(preselected) >= 2:
 		best_pair = None
-		best_pair_score = best_score  # start with the empty set score
+		best_pair_score = best_score  # Start with the empty set score.
 		
 		for i in range(len(preselected)):
 			for j in range(i + 1, len(preselected)):
@@ -231,9 +142,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 					sparsity_threshold=sparsity_threshold, lm_model=lm_model,
 					target_token_id=target_token_id
 				)
-				
-				# For target maximization, higher is better
-				# For distribution change, higher is better
+				# For both objectives, higher scores are better.
 				if score > best_pair_score:
 					best_pair_score = score
 					best_pair = pair
@@ -242,7 +151,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 			best_set = best_pair
 			best_score = best_pair_score
 
-	# Greedy iterative expansion
+	# Greedy iterative expansion.
 	improved = True
 	iteration_count = 0
 	total_iterations = len(preselected) + 1
@@ -263,8 +172,7 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 				sparsity_threshold=sparsity_threshold, lm_model=lm_model,
 				target_token_id=target_token_id
 			)
-			
-			# For both objectives, higher scores are better
+			# For both objectives, higher scores are better.
 			if score > candidate_score:
 				candidate_score = score
 				best_candidate = candidate
@@ -274,9 +182,8 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 			best_set.append(best_candidate)
 			best_score = candidate_score
 			
-			# Check if we're targeting a specific token and it has reached rank 1
+			# If targeting a specific token, check if it has become the top prediction.
 			if target_token_id is not None:
-				# Run inference with current best set to get latest probabilities
 				hook_handles = []
 				for (layer, head) in best_set:
 					if ablation_method == 'standard':
@@ -297,34 +204,33 @@ def find_best_ablation_combo(truncated_ids, baseline_probs, token_index=-1, max_
 					handle.remove()
 					
 				ablated_probs = torch.softmax(ablated_logits, dim=-1)
-				
-				# Check if target token is now the top prediction
+				# If the target token is now the top prediction, stop early.
 				top_token_id = torch.argmax(ablated_probs).item()
 				if top_token_id == target_token_id:
 					print(f"Target token reached rank 1! Stopping ablation search early after adding {len(best_set)} heads.")
-					break  # Early stopping when target token is top prediction
+					break
 		
 		iteration_count += 1
 		if progress_callback is not None:
-			progress_callback(int(40 + (iteration_count / total_iterations * 60)))
+			progress_callback(int(INITIAL_PROGRESS + (iteration_count / total_iterations * FINAL_PROGRESS)))
 			
 	return best_set, best_score
 
 
-def evaluate_all_heads(truncated_ids, baseline_probs, lm_model, token_index=-1, scale=0.0, ablation_method='standard', sparsity_threshold=0.1):
+def evaluate_all_heads(truncated_ids, baseline_probs, lm_model, token_index=-1, scale=DEFAULT_SCALE, ablation_method='standard', sparsity_threshold=DEFAULT_SPARSITY_THRESHOLD):
 	"""
 	Evaluate the impact of ablating each attention head individually for the token at token_index.
 
-	This function iterates over all (layer, head) pairs in the model, computing an ablation score using evaluate_candidate.
-	The score reflects the impact on the prediction for the token at the specified index.
+	Iterates over all (layer, head) pairs in the model, computing an ablation score using evaluate_candidate.
+	The resulting dictionary maps each (layer, head) tuple to its corresponding ablation score.
 
 	:param truncated_ids: Input token IDs up to the token of interest.
 	:param baseline_probs: Baseline probability distribution for the token at token_index.
 	:param lm_model: The language model instance.
 	:param token_index: Index of the token to evaluate.
-	:param scale: Scale factor for standard ablation (0.0 means full ablation).
-	:param ablation_method: Method of ablation ('standard', 'permute', 'sparsify').
-	:param sparsity_threshold: Threshold for sparsification.
+	:param scale: Scale factor for standard ablation (default: DEFAULT_SCALE).
+	:param ablation_method: Method of ablation ('standard', 'permute', or 'sparsify').
+	:param sparsity_threshold: Threshold for sparsification (default: DEFAULT_SPARSITY_THRESHOLD).
 	:return: Dictionary mapping (layer, head) tuples to their ablation score.
 	"""
 	head_scores = {}
@@ -337,5 +243,3 @@ def evaluate_all_heads(truncated_ids, baseline_probs, lm_model, token_index=-1, 
 			)
 			head_scores[(layer, head)] = score
 	return head_scores
-
-
