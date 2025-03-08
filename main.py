@@ -121,7 +121,9 @@ def build_layout():
 				html.P("- Select one or more layer-head pairs to view their attention heatmaps.", className="card-text"),
 				html.P("- Use the slider to set a threshold and filter weak attention links.", className="card-text"),
 				html.P("- Click a cell in any heatmap to view details about that token.", className="card-text"),
-				html.P("- Ablation (causal tracing) lets you see how head removal changes predictions.", className="card-text")
+				html.P("- Ablation (causal tracing) lets you see how head removal changes predictions.", className="card-text"),
+				html.P("- Click on 'Evaluate all Heads' to determine the impact of ablating each Layer-Head pair on the current predicted token.", className="card-text"),
+				html.P("- Click on 'Discover Circuit' to do a basic circuit analysis based on 'Interpretability in the Wild[...]' by Wang et al.", className="card-text")
 			])
 		],
 		style={"width": "100%", "marginBottom": "20px"}
